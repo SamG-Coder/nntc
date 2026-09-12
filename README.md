@@ -1,1 +1,1 @@
-# nntc
+# nntc - Not Neural Texture Compression
