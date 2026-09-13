@@ -311,7 +311,7 @@ the method, `docs/MATHEMATICS.md` the notes for whoever changes it, `PRIOR_ART_D
 * No entropy coding: an asset's size is fixed by its layout.
 * The encoder never deletes a file or a directory. A run leaves any stale sibling under its prefix alone; the
   descriptor names the files that belong to the asset.
-* The less correlated the inputs, the more channels needed to avoid crosstalk between textures.
+* The less correlated the inputs, the more channels needed to avoid crosstalk between textures. Conversely, the lower the dimensionality (i.e. the more correlated) the input textures are, the better this technique works, and the less channels you'll need to avoid crosstalk.
 
 ## Licences
 
