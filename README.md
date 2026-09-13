@@ -11,6 +11,8 @@ The `nntc_view` is a small Windows D3D11 viewer that loads the .json and .dds fi
 
 Importantly, this method is compatible with normal GPU texture hardware bilinear, trilinear, and anisotropic filtering. The encoder ensures the encoded latents and the fitted coefficients are compatible with hardware filtering. The end result: large runtime memory savings due to packing 2-6 correlated material textures into a single set of latent textures, which are sampled normally and then decoded by a small pixel shader function.
 
+A Prior Art Disclosure, dated September 13, 2026 is [here](https://github.com/richgel999/nntc/blob/main/PRIOR_ART_DISCLOSURE.md).
+
 ## What it does
 
 * **Input**: one to six 24-bit RGB images of the same size (PNG, JPEG, TGA, BMP and the other formats `stb_image`
