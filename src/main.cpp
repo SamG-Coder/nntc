@@ -331,9 +331,8 @@ static void usage_advanced()
     printf("  --check           recompute E by brute force on the host and print both            (off)\n");
     printf("  --diag            the per-plane diagnosis table: every texture's psnr at every level and\n");
     printf("                    every latent channel's statistics and grid-end share, plane by plane   (off)\n");
-    printf("  --quiet           no progress at all: no banner, no settings rows, no per-round lines, no init,\n");
-    printf("                    grid-freeze, pack, refine or outer-pass lines. The WARNINGS, the ERRORS, the\n");
-    printf("                    `wrote` lines and the whole final report are printed whatever it says     (off)\n");
+    printf("  --quiet           print nothing but the WARNING and ERROR lines: no banner, no progress, no\n");
+    printf("                    `wrote` lines and no report                                             (off)\n");
 }
 
 // The command line's numbers are parsed with the whole argument consumed, so that a value the shell mangled or a typed
@@ -2639,8 +2638,10 @@ int main(int argc, char** argv)
 
     // ---- the report
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
-    // The report is printed whatever --quiet says. It is the only account of what the encode produced, and a flag that
-    // asks for less progress on the screen is not a request to be told less about the asset.
+    // --quiet means quiet: nothing on stdout but the WARNING lines, and nothing on stderr but the ERROR lines (the
+    // owner's rule). The report, like the `wrote` lines, is progress a script did not ask for; the asset and its
+    // descriptor are the account of what the encode produced.
+    if (!o.quiet)
     {
         printf("\nreport\n");
         for (int t = 0; t < m.textures; t++)

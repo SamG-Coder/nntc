@@ -139,9 +139,8 @@ every texture takes the default. There is no single-value broadcast (`--bits0` h
 
 `--help` lists the everyday options, `--help-advanced` the solver's. `--diag` prints a per-texture, per-mip
 diagnosis table before the report, and with it the range of every source level, which is where the chain's clamp is
-visible. `--quiet` drops the progress entirely -- the banner, the per-texture settings rows, the per-round lines, the
-level-0 init block, the grid freeze, the pack, the refinement and the outer passes; the warnings, the errors, the
-`wrote` lines and the whole final report are always printed. `--png 1` (the default) writes both the decoded and the
+visible. `--quiet` prints nothing but the warnings and the errors: no banner, no progress, no `wrote` lines and no
+report; the asset and its descriptor are the account of what the run produced. `--png 1` (the default) writes both the decoded and the
 source PNGs per texture per mip level (`_recon_` and `_src_`; with two or more textures the names carry `_t<n>_`);
 `--png 0` skips them.
 

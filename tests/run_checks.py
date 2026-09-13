@@ -1283,13 +1283,13 @@ def six_texture_checks(encode, build_dir):
             raise SystemExit('FAIL: --quiet returned %d' % quiet.returncode)
         if 'nntc_encode: 6 textures' in quiet.stdout or re.search(r'^round\s+\d+', quiet.stdout, re.MULTILINE):
             raise SystemExit('FAIL: --quiet must print neither the banner and its settings rows nor the round lines')
-        if '\nreport\n' not in quiet.stdout or 'psnr         texture 5' not in quiet.stdout:
-            raise SystemExit('FAIL: --quiet must still print the whole report')
-        # The level 1 grid line sits between the `wrote` lines and the report and is progress - a check that ran and
-        # passed - so --quiet drops it with the rest.
-        if any(line.startswith('level 1 grid') for line in quiet.stdout.splitlines()):
-            raise SystemExit('FAIL: --quiet must not print the level 1 grid line')
-        print('  --quiet: no banner, no settings rows, no round lines, no grid line, and the report in full')
+        # --quiet means quiet: nothing but WARNING and ERROR lines. This run has neither, so its stdout must be empty.
+        stray = [line for line in quiet.stdout.splitlines() if line.strip() and not line.startswith('WARNING')]
+        if stray:
+            raise SystemExit('FAIL: --quiet must print nothing but warnings and errors, not %r' % stray[:3])
+        if quiet.stderr.strip():
+            raise SystemExit('FAIL: --quiet printed to stderr on a clean run: %r' % quiet.stderr[:200])
+        print('  --quiet: nothing at all on a clean run')
 
         if os.name != 'nt':
             print('  the viewer: skipped (Windows only)')
@@ -1677,9 +1677,9 @@ def material_checks(encode, build_dir):
             raise SystemExit('FAIL: --quiet over a material returned %d' % quiet.returncode)
         if 'nntc_encode: 2 textures' in quiet.stdout or re.search(r'^round\s+\d+', quiet.stdout, re.MULTILINE):
             raise SystemExit('FAIL: --quiet over a material must print neither the banner nor the round lines')
-        if '\nreport\n' not in quiet.stdout:
-            raise SystemExit('FAIL: --quiet must still print the report')
-        print('  the material: --quiet prints no banner and no round lines, and the whole report')
+        if '\nreport\n' in quiet.stdout or 'wrote ' in quiet.stdout:
+            raise SystemExit('FAIL: --quiet must print neither the report nor the wrote lines')
+        print('  the material: --quiet prints no banner, no round lines, no wrote lines and no report')
 
         # THE INDEPENDENT DECODER AND THE VIEWER on an asset written from a material.
         dec = run([sys.executable, os.path.join('tools', 'dds_decode.py'), prefix, '--grid'])
@@ -2029,7 +2029,7 @@ def material_detail_checks(encode, build_dir):
         none = write_material(os.path.join(tmp, 'rgbnone.json'), [{'file': 'c0.png'}, {'file': 'c1.png'}])
         ships = []
         for path, name in ((one, 'rgbone'), (none, 'rgbnone')):
-            proc = run([encode, path, '-o', os.path.join('out', 'mat_' + name), '--png', '0', '--quiet'])
+            proc = run([encode, path, '-o', os.path.join('out', 'mat_' + name), '--png', '0'])
             if proc.returncode != 0:
                 raise SystemExit('FAIL: the %s material returned %d' % (name, proc.returncode))
             ships.append(number(proc.stdout, r'E shipped\s+([0-9.e+-]+)', 'E shipped')[0])
@@ -2317,7 +2317,7 @@ def review_fix_checks(encode, build_dir):
             # code page; the embedded manifest declares it UTF-8, so the accented name survives from the shell to fopen
             # and back out in the wrote line. The gate passes the argument as a Python str, which subprocess hands to
             # CreateProcessW; the C runtime then narrows it to the active code page, UTF-8 under the manifest.
-            proc = run([encode, accent, '-o', os.path.join('out', 'review_unicode_cli'), '--png', '0', '--quiet'])
+            proc = run([encode, accent, '-o', os.path.join('out', 'review_unicode_cli'), '--png', '0'])
             if proc.returncode != 0:
                 raise SystemExit('FAIL: a non-ASCII file named on the command line must encode (%d): %s'
                                  % (proc.returncode, proc.stderr.strip()))
@@ -2336,8 +2336,8 @@ def review_fix_checks(encode, build_dir):
         if noisy:
             raise SystemExit('FAIL: --quiet still printed %d progress line(s), the first being %r'
                              % (len(noisy), noisy[0]))
-        if '\nreport\n' not in quiet.stdout:
-            raise SystemExit('FAIL: --quiet must still print the report')
+        if '\nreport\n' in quiet.stdout or 'wrote ' in quiet.stdout:
+            raise SystemExit('FAIL: --quiet must print neither the report nor the wrote lines')
         # The two things --quiet must NOT take with it: the warning about the input, and the warning about the
         # settings. Neither is progress, and a run that quietly padded or quietly overrode would be the same silence
         # every other case here is about.
@@ -2351,7 +2351,7 @@ def review_fix_checks(encode, build_dir):
                     '--weights', '1'])
         if proc.returncode != 0 or 'the command line wins' not in proc.stdout:
             raise SystemExit('FAIL: --quiet must still print the override WARNING')
-        print('  the review: --quiet prints no progress at all and still prints both WARNINGs and the report')
+        print('  the review: --quiet prints nothing but the WARNINGs')
 
         # (6) A BYTE-ORDER MARK AND A PARSE POSITION. Several Windows editors write the mark when they save UTF-8; a
         # trailing comma is the everyday hand-edit. Both used to come back as the same "must be one JSON array".

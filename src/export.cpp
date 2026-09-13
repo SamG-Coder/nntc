@@ -616,7 +616,7 @@ bool write_asset(const Model& m, const std::string& prefix, const std::string& j
                 if (!dds_write(file, bw, bh, f_dxgi, true, linear, blocks, bytes))
                     return false;
                 total += bytes;
-                printf("wrote %s: %s %dx%d, %d mip level%s, channel%s %d%s, %zu bytes\n", display_path(file).c_str(),
+                if (!quiet) printf("wrote %s: %s %dx%d, %d mip level%s, channel%s %d%s, %zu bytes\n", display_path(file).c_str(),
                        f_name.c_str(), bw, bh, nplanes, nplanes == 1 ? "" : "s", nc == 1 ? "" : "s", 2 * f,
                        nc == 1 ? "" : (" and " + std::to_string(2 * f + 1)).c_str(), bytes);
                 // Two files carry an OBJECT each, because they no longer have to share a format: a reader has to know
@@ -688,7 +688,7 @@ bool write_asset(const Model& m, const std::string& prefix, const std::string& j
             if (!dds_write(file, bw, bh, dxgi, false, (uint32_t)(bw * stored_out), levels, bytes))
                 return false;
             sizes[l] = bytes;
-            printf("wrote %s: %s %dx%d, %d mip level%s, %d channel%s of %d stored, %zu bytes\n", display_path(file).c_str(),
+            if (!quiet) printf("wrote %s: %s %dx%d, %d mip level%s, %d channel%s of %d stored, %zu bytes\n", display_path(file).c_str(),
                    format_name.c_str(), bw, bh, nplanes, nplanes == 1 ? "" : "s", channels, channels == 1 ? "" : "s",
                    stored_out, bytes);
             files_js = "\"" + basename_of(file) + "\"";
@@ -801,7 +801,7 @@ bool write_asset(const Model& m, const std::string& prefix, const std::string& j
         return false;
     }
     sizes[2] = js.size();
-    printf("wrote %s: the sizes, the bits per channel, the dequantisation of both levels and the decoder's one layer\n",
+    if (!quiet) printf("wrote %s: the sizes, the bits per channel, the dequantisation of both levels and the decoder's one layer\n",
            display_path(jname).c_str());
     // The grid line is progress - a check that ran and passed - and not part of the report, so --quiet drops it as it
     // drops every other running line.
