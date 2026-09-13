@@ -7,7 +7,7 @@ four channels, and one matrix multiply of a few dozen to a few hundred multiply-
 material (the count is in [How it works](#how-it-works-briefly), below). No runtime library, no decompression at load, no neural inference: the files are standard `.dds`
 (BC4 / BC5 and 8-bit) and a `.json` containing the fitted bilinear model's decoder coefficients.
 
-The `nntc_view` is a small Windows D3D11 viewer that loads the .json and .dds files and displays the sampled and decoded results on a quad or a cubemap.
+The `nntc_view` is a Windows D3D11 viewer that loads the .json and .dds files and displays the sampled and decoded results on a quad or a cubemap.
 
 Importantly, this method is compatible with normal GPU texture hardware bilinear, trilinear, and anisotropic filtering. The encoder ensures the encoded latents and the fitted coefficients are compatible with hardware filtering. The end result: large runtime memory savings due to packing 2-6 correlated material textures into a single set of latent textures, which are sampled normally and then decoded by a small pixel shader function.
 
@@ -90,9 +90,8 @@ nntc_encode a.png b.png --weights 2,1           -> the first texture matters twi
 nntc_encode a.png --c0 1 --c1 2                 -> a smaller layout: 4 + 1 = 5 bits per pixel at the base
 nntc_encode rock_material.json -o out/          -> the same, with the inputs and their settings named in a file
 nntc_encode a.png -o out/name.json              -> the descriptor is exactly out/name.json, the .dds out/name_lat0.dds
-nntc_encode me1.png me2.png me3.png m4.png --c0 3        -> use 3 channels on latent 0 (harder material)
-nntc_encode me1.png me2.png me3.png m4.png m5.png --c0 4 -> use 4 channels on latent 0 (even harder material)
-nntc_encode me1.png me2.png me3.png m4.png m5.png --c0 4 --c1 4 -> use 4 channels on latent 0, 4 on latent 1 (even harder material)
+nntc_encode me1.png me2.png me3.png me4.png --c0 3        -> use 3 channels on latent 0 (harder material)
+nntc_encode me1.png me2.png me3.png me4.png me5.png --c0 4 -> use 4 channels on latent 0 (even harder material)
 ```
 
 The tree also carries two small source-material examples under `examples/`, with their source PNGs and precompressed
