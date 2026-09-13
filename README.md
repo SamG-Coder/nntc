@@ -83,15 +83,15 @@ in the last bit between platforms, so those runs agree across platforms in PSNR 
 ## Encoding
 
 ```
-nntc_encode albedo.png                          -> albedo_lat0.dds, albedo_lat1.dds, albedo_nntc.json in the current directory
-nntc_encode albedo.png normal.png rough.png     -> a 3-texture material, named after the first input
-nntc_encode a.png b.png -o out/                 -> the same files under out/
-nntc_encode a.png b.png --weights 2,1           -> the first texture matters twice as much
-nntc_encode a.png --c0 1 --c1 2                 -> a smaller layout: 4 + 1 = 5 bits per pixel at the base
-nntc_encode rock_material.json -o out/          -> the same, with the inputs and their settings named in a file
-nntc_encode a.png -o out/name.json              -> the descriptor is exactly out/name.json, the .dds out/name_lat0.dds
-nntc_encode me1.png me2.png me3.png me4.png --c0 3        -> use 3 channels on latent 0 (harder material)
-nntc_encode me1.png me2.png me3.png me4.png me5.png --c0 4 -> use 4 channels on latent 0 (even harder material)
+nntc_encode albedo.png                                      -> albedo_lat0.dds, albedo_lat1.dds, albedo_nntc.json in the current directory
+nntc_encode albedo.png normal.png rough.png                 -> a 3-texture material, named after the first input
+nntc_encode a.png b.png -o out/                             -> the same files under out/
+nntc_encode a.png b.png --weights 2,1                       -> the first texture matters twice as much
+nntc_encode a.png --c0 1 --c1 2                             -> a smaller layout: 4 + 1 = 5 bits per pixel at the base
+nntc_encode rock_material.json -o out/                      -> the same, with the inputs and their settings named in a file
+nntc_encode a.png -o out/name.json                          -> the descriptor is exactly out/name.json, the .dds out/name_lat0.dds
+nntc_encode me1.png me2.png me3.png me4.png --c0 3          -> 3 channels on latent 0, a BC5 and a BC4 (a harder material)
+nntc_encode me1.png me2.png me3.png me4.png me5.png --c0 4  -> 4 channels on latent 0, two BC5s (a harder material still)
 ```
 
 The tree also carries two small source-material examples under `examples/`, with their source PNGs and precompressed
