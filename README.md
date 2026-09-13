@@ -34,8 +34,8 @@ Importantly, this method is compatible with normal GPU texture hardware bilinear
   1.3 s for four 512x512 textures at the default layout (`out/disclosure/log_m1234_default.txt`), 5.47 s for one
   2888x4320 image at `--l0 palette --c0 1 --bits0 4 --c1 2` (`out/s7/cmp/log_model34_c1b4_c2b8.txt`), 15.2 s for four
   2048x1024 textures at `--c0 4 --c1 4` (`out/timing/log_md1234_c4c4.txt`). Larger inputs take longer: four 4096x4096
-  textures run on the order of a minute (seen during development; no log in the tree). It is a CUDA program; without
-  an NVIDIA GPU it does not encode. The asset it writes decodes on any GPU.
+  textures run on the order of a minute (seen during development). It currently only supports CUDA; without
+  an NVIDIA GPU it does not encode, however the assets it writes decodes on any GPU.
 * **Encode Quality**: fitted for the hardware filter, not texel by texel, so bilinear, trilinear and anisotropic sampling all
   reconstruct correctly. `docs/RESULTS.md` has the measurements.
 
