@@ -1,0 +1,479 @@
+{
+  "format": "nntc-dds-1",
+  "source": {
+    "width": 512,
+    "height": 512,
+    "inputs": [
+      {
+        "file": "m1.png",
+        "type": "normal",
+        "filter": "mitchell",
+        "srgb": false,
+        "edge": "clamp",
+        "normal_map": true,
+        "weight": 1,
+        "rgb_weights": [
+          1,
+          1,
+          1
+        ]
+      },
+      {
+        "file": "m2.png",
+        "type": "",
+        "filter": "mitchell",
+        "srgb": false,
+        "edge": "clamp",
+        "normal_map": false,
+        "weight": 1,
+        "rgb_weights": [
+          1,
+          1,
+          1
+        ]
+      },
+      {
+        "file": "m3.png",
+        "type": "albedo",
+        "filter": "mitchell",
+        "srgb": true,
+        "edge": "clamp",
+        "normal_map": false,
+        "weight": 2.5,
+        "rgb_weights": [
+          1,
+          1,
+          1
+        ]
+      },
+      {
+        "file": "m4.png",
+        "type": "",
+        "filter": "mitchell",
+        "srgb": false,
+        "edge": "clamp",
+        "normal_map": false,
+        "weight": 1,
+        "rgb_weights": [
+          1,
+          1,
+          1
+        ]
+      }
+    ]
+  },
+  "decode": {
+    "width": 512,
+    "height": 512,
+    "textures_out": 4
+  },
+  "block": 4,
+  "lod_bias_level1": 2,
+  "sampling": "both latent textures are read through the hardware filter at the same coordinate; at a base pixel centre level 0's filtered sample is that one texel (it is at the decoded extent) and level 1 blends four, and between centres both are filtered, which is what the encoder fits; output mip m reads mip m of BOTH textures (the 1:1 rule), and level 1 has 1/block of the texels per axis, so its sampler needs MipLODBias = log2(block) = the value in lod_bias_level1, else the GPU reads it log2(block) mips finer than fitted and the colour goes splotchy from mip 1 down; dequantise AFTER sampling: value = lo + sample * (hi - lo) per channel, which is the grid the encoder fitted (the byte is the quantisation index in the top bits, replicated, and the exact index is byte >> (8 - bits); a block-compressed level 0 decodes index k to k / (2 ^ bits - 1) of full scale instead, which is what its own palette array carries)",
+  "textures": [
+    {
+      "files": [
+        {
+          "file": "m1_m4_c0_3_c1_4_lat0a.dds",
+          "dxgi_format": "BC5_UNORM",
+          "dxgi_format_id": 83,
+          "channels_stored": 2
+        },
+        {
+          "file": "m1_m4_c0_3_c1_4_lat0b.dds",
+          "dxgi_format": "BC4_UNORM",
+          "dxgi_format_id": 80,
+          "channels_stored": 1
+        }
+      ],
+      "level": 0,
+      "width": 512,
+      "height": 512,
+      "dxgi_format": "BC5_UNORM",
+      "dxgi_format_id": 83,
+      "channels_used": 3,
+      "channels_stored": 2,
+      "bc_palette": "standard",
+      "bits_per_channel": [
+        8,
+        8,
+        8
+      ],
+      "mip_count": 7,
+      "mip_sizes": [
+        [
+          512,
+          512
+        ],
+        [
+          256,
+          256
+        ],
+        [
+          128,
+          128
+        ],
+        [
+          64,
+          64
+        ],
+        [
+          32,
+          32
+        ],
+        [
+          16,
+          16
+        ],
+        [
+          8,
+          8
+        ]
+      ],
+      "texel": "an 8-bit continuous value, BC4 / BC5 encoded: one BC4 block per 4x4 texels of each channel (two endpoint bytes and sixteen 3-bit selectors packed LSB-first, row-major; a BC5 block is the two channels' BC4 blocks in order), the standard k / 7 palette of the Direct3D functional specification. The encoder solved this plane as a continuous 8-bit plane, encoded it as BC and then went on optimising it AS BC - every block's endpoints and selectors re-chosen against the decoder's own output error, the model refitted and the plane repacked in outer passes - so these blocks are the representation that was measured. A block carries eight fitted values along a line and there is no quantisation index to recover: dequantise the sampled byte, which is what the rule below says. Channels 0-1 are in the first file, a BC5, and channel 2 alone in the second, a BC4 of 8 bytes per block",
+      "dequantise": {
+        "kind": "range",
+        "note": "value = lo + byte / 255 * (hi - lo) per channel, the byte as the sampler returns it. This level was solved as a continuous 8-bit plane, BC4 / BC5-encoded, and the pack then refined block by block against the decoder's own output error and repacked, so the byte is a block palette entry the encoder chose and not a quantisation index; at 8 bits the index rule lo + k / levels * (hi - lo) is the same number anyway",
+        "lo": [
+          -0.635221243,
+          -0.274916202,
+          -0.699730039
+        ],
+        "hi": [
+          0.698871732,
+          0.532535553,
+          0.684135616
+        ],
+        "levels": 255
+      }
+    },
+    {
+      "file": "m1_m4_c0_3_c1_4_lat1.dds",
+      "level": 1,
+      "width": 128,
+      "height": 128,
+      "dxgi_format": "R8G8B8A8_UNORM",
+      "dxgi_format_id": 28,
+      "channels_used": 4,
+      "channels_stored": 4,
+      "bits_per_channel": [
+        8,
+        8,
+        8,
+        8
+      ],
+      "mip_count": 7,
+      "mip_sizes": [
+        [
+          128,
+          128
+        ],
+        [
+          64,
+          64
+        ],
+        [
+          32,
+          32
+        ],
+        [
+          16,
+          16
+        ],
+        [
+          8,
+          8
+        ],
+        [
+          4,
+          4
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "texel": "the quantisation index k in the byte's top bits, replicated into the low bits (byte = k << (8 - bits) | k >> (2 bits - 8) | ...); recover k losslessly with byte >> (8 - bits), or dequantise the sampled byte directly - the palette of this plane IS lo + byte / 255 * (hi - lo), because that is what the encoder fitted",
+      "dequantise": {
+        "kind": "range",
+        "note": "value = lo + byte / 255 * (hi - lo) per channel, the byte as the sampler returns it; the byte is the index k = byte >> (8 - bits) replicated over the byte, which is lo + k / levels * (hi - lo) exactly at 4 and 8 bits and within half a byte of it at 5, 6 and 7",
+        "lo": [
+          -0.731372356,
+          -0.827401757,
+          0.303549051,
+          -0.123544157
+        ],
+        "hi": [
+          0.747469425,
+          0.736940324,
+          1.07647371,
+          0.412390113
+        ],
+        "levels": 255
+      }
+    }
+  ],
+  "decoder": {
+    "type": "bilinear",
+    "terms": "a b sc",
+    "C0": 3,
+    "C1": 4,
+    "features": "phi(z) in this order: [a] c_j for j < C1 (the level-1 channels), [b] s_i for i < C0 (the level-0 channels), [sc] s_i * c_j for i < C0, j < C1 (i outer, j inner); the output is W phi + b",
+    "nin": 19,
+    "nout": 12,
+    "hidden": [],
+    "activation": "leaky_relu",
+    "leak": 0,
+    "output": "identity",
+    "layers": [
+      {
+        "rows": 12,
+        "cols": 19,
+        "weights": [
+          0.741635025,
+          0.149487257,
+          -0.0586832091,
+          0.117196202,
+          -0.122287683,
+          0.484710753,
+          0.927574158,
+          0.126119316,
+          -0.175848886,
+          0.281863719,
+          -0.12211933,
+          -0.476027787,
+          -0.378942132,
+          0.477084965,
+          -2.42546105,
+          0.514508367,
+          -0.798509359,
+          -0.573876798,
+          -0.957183301,
+          0.148539737,
+          0.603625953,
+          -0.0715460107,
+          0.125929654,
+          -0.383333683,
+          1.78191841,
+          -0.0759592056,
+          0.0232396051,
+          0.18158336,
+          0.412431866,
+          0.31032905,
+          0.481048256,
+          -0.580871701,
+          -0.982826293,
+          -2.55957079,
+          1.07578576,
+          -0.427750826,
+          -0.224286333,
+          -0.448633492,
+          0.0517239682,
+          -0.0376757309,
+          0.408425212,
+          -0.157714888,
+          -0.300322592,
+          0.15499106,
+          -0.199795231,
+          0.0681343898,
+          0.113355085,
+          0.265188009,
+          0.732027829,
+          -0.318745017,
+          -0.49237299,
+          -0.164710492,
+          0.372428924,
+          -0.552047431,
+          0.726153076,
+          0.207801163,
+          0.291099817,
+          0.00757037243,
+          -0.0114138406,
+          0.0129177226,
+          0.534789026,
+          -0.000157453731,
+          -0.0290076025,
+          0.0175007749,
+          0.00530528463,
+          -0.0400171988,
+          0.125732362,
+          -0.15766421,
+          -0.00143149646,
+          -0.122758009,
+          -0.0186724346,
+          0.106801935,
+          -0.021793317,
+          0.0541860424,
+          -0.0413086824,
+          0.0560586713,
+          0.00757037243,
+          -0.0114138406,
+          0.0129177226,
+          0.534789026,
+          -0.000157453731,
+          -0.0290076025,
+          0.0175007749,
+          0.00530528463,
+          -0.0400171988,
+          0.125732362,
+          -0.15766421,
+          -0.00143149646,
+          -0.122758009,
+          -0.0186724346,
+          0.106801935,
+          -0.021793317,
+          0.0541860424,
+          -0.0413086824,
+          0.0560586713,
+          0.00757037243,
+          -0.0114138406,
+          0.0129177226,
+          0.534789026,
+          -0.000157453731,
+          -0.0290076025,
+          0.0175007749,
+          0.00530528463,
+          -0.0400171988,
+          0.125732362,
+          -0.15766421,
+          -0.00143149646,
+          -0.122758009,
+          -0.0186724346,
+          0.106801935,
+          -0.021793317,
+          0.0541860424,
+          -0.0413086824,
+          0.0560586713,
+          0.0342551507,
+          0.0364662334,
+          0.132180706,
+          -0.787935019,
+          -0.808017254,
+          0.578459144,
+          0.0538061485,
+          -0.0318973735,
+          0.218012944,
+          0.0998507217,
+          1.65080166,
+          -0.217345431,
+          -0.00249912986,
+          -0.111402676,
+          0.280934304,
+          -0.178675279,
+          0.127780646,
+          -0.0931065977,
+          0.152311102,
+          -0.00218791142,
+          0.030769024,
+          0.0109133031,
+          -0.829764426,
+          -0.970288336,
+          0.25303632,
+          -0.153175786,
+          0.140377313,
+          0.207950205,
+          0.315041482,
+          1.55944681,
+          -0.0627877861,
+          0.0347004496,
+          0.319879383,
+          0.366919935,
+          -0.178462788,
+          0.207830682,
+          0.181113735,
+          0.224048868,
+          -0.0688509122,
+          -0.0150315706,
+          0.446386278,
+          -0.730595171,
+          -0.181492165,
+          0.389517844,
+          -0.0509967208,
+          0.229271263,
+          0.31372866,
+          -0.536460221,
+          1.72572851,
+          -0.00363445212,
+          0.130187854,
+          0.209801421,
+          0.184024155,
+          0.0740315244,
+          -0.0992948189,
+          0.120633632,
+          -0.105932876,
+          0.0550523512,
+          -0.00899324752,
+          0.215093672,
+          -0.609669745,
+          -0.367432922,
+          -0.686182201,
+          -0.0470810868,
+          0.151738524,
+          -0.174624354,
+          0.264446497,
+          -2.54918098,
+          0.267010868,
+          -0.126844078,
+          0.53243643,
+          -2.03852558,
+          0.167108402,
+          -0.207614943,
+          0.0621824227,
+          0.00430557411,
+          0.0550523512,
+          -0.00899324752,
+          0.215093672,
+          -0.609669745,
+          -0.367432922,
+          -0.686182201,
+          -0.0470810868,
+          0.151738524,
+          -0.174624354,
+          0.264446497,
+          -2.54918098,
+          0.267010868,
+          -0.126844078,
+          0.53243643,
+          -2.03852558,
+          0.167108402,
+          -0.207614943,
+          0.0621824227,
+          0.00430557411,
+          0.0550523512,
+          -0.00899324752,
+          0.215093672,
+          -0.609669745,
+          -0.367432922,
+          -0.686182201,
+          -0.0470810868,
+          0.151738524,
+          -0.174624354,
+          0.264446497,
+          -2.54918098,
+          0.267010868,
+          -0.126844078,
+          0.53243643,
+          -2.03852558,
+          0.167108402,
+          -0.207614943,
+          0.0621824227,
+          0.00430557411
+        ],
+        "bias": [
+          0.554926276,
+          0.572520435,
+          0.581249177,
+          0.486783057,
+          0.486783057,
+          0.486783057,
+          0.470914155,
+          0.575516701,
+          0.145574272,
+          0.780620575,
+          0.780620575,
+          0.780620575
+        ]
+      }
+    ]
+  }
+}

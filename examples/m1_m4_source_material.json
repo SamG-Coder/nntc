@@ -1,0 +1,32 @@
+[
+  {
+    "file": "m1.png",
+    "type": "normal",
+    "filter": "mitchell",
+    "normal_map": true,
+    "weight": 1,
+    "rgb_weights": [1, 1, 1]
+  },
+  {
+    "file": "m2.png",
+    "type": "",
+    "filter": "mitchell",
+    "weight": 1,
+    "rgb_weights": [1, 1, 1]
+  },
+  {
+    "file": "m3.png",
+    "type": "albedo",
+    "filter": "mitchell",
+    "srgb": true,
+    "weight": 2.5,
+    "rgb_weights": [1, 1, 1]
+  },
+  {
+    "file": "m4.png",
+    "type": "",
+    "filter": "mitchell",
+    "weight": 1,
+    "rgb_weights": [1, 1, 1]
+  }
+]

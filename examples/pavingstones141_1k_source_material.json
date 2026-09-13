@@ -1,0 +1,44 @@
+[
+  {
+    "file": "PavingStones141_1K-PNG_Color.png",
+    "type": "albedo",
+    "filter": "mitchell",
+    "srgb": true,
+    "edge": "clamp",
+    "weight": 1,
+    "rgb_weights": [1, 1, 1]
+  },
+  {
+    "file": "PavingStones141_1K-PNG_NormalDX.png",
+    "type": "normal",
+    "filter": "mitchell",
+    "normal_map": true,
+    "edge": "clamp",
+    "weight": 1,
+    "rgb_weights": [1, 1, 1]
+  },
+  {
+    "file": "PavingStones141_1K-PNG_Roughness.png",
+    "type": "roughness",
+    "filter": "mitchell",
+    "edge": "clamp",
+    "weight": 1,
+    "rgb_weights": [1, 1, 1]
+  },
+  {
+    "file": "PavingStones141_1K-PNG_AmbientOcclusion.png",
+    "type": "ambient_occlusion",
+    "filter": "mitchell",
+    "edge": "clamp",
+    "weight": 1,
+    "rgb_weights": [1, 1, 1]
+  },
+  {
+    "file": "PavingStones141_1K-PNG_Displacement.png",
+    "type": "displacement",
+    "filter": "mitchell",
+    "edge": "clamp",
+    "weight": 1,
+    "rgb_weights": [1, 1, 1]
+  }
+]
