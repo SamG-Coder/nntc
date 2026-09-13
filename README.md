@@ -325,4 +325,4 @@ the method, `docs/MATHEMATICS.md` the notes for whoever changes it, `PRIOR_ART_D
 | `src/json.h` | public domain (Unlicense), [sheredom](https://github.com/sheredom/json.h) |
 | `viewer/bcdec.h` | MIT / Unlicense dual, [iOrange](https://github.com/iOrange/bcdec) |
 | `src/stb_image.h`, `src/stb_image_write.h`, `src/stb_image_resize2.h` | public domain / MIT dual, [Sean Barrett](https://github.com/nothings/stb) |
-| `examples/PavingStones141_1K-PNG_*.png` | CC0, the PavingStones141 material from [ambientCG](https://ambientcg.com); the other example textures are the author's |
+| `examples/PavingStones141_1K-PNG_*.png` | CC0, the PavingStones141 and another material from [ambientCG](https://ambientcg.com) |
