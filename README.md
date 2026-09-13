@@ -1,13 +1,15 @@
 # NNTC: Not Neural Texture Compression
 
-`nntc_encode` compresses a 24-bpp texture, or a material of up to six 24-bpp textures, into **two latent planes and a few dozen
+The `nntc_encode` tool (for Windows or Linux) compresses a 24-bpp texture, or a material of up to six 24-bpp textures, into **two mipmapped latent planes and a few dozen
 matrix coefficients**. It outputs two `.dds` textures, or three when the full-resolution plane has three or four channels. A pixel shader decodes
 the whole material back from **two ordinary `Sample()` calls** -- three when the full-resolution plane has three or
 four channels -- and one matrix multiply of a few dozen to a few hundred multiply-accumulates per pixel for the whole
 material (the count is in [How it works](#how-it-works-briefly), below). No runtime library, no decompression at load: the files are standard `.dds`
 (BC4 / BC5 and 8-bit) and a `.json` containing the fitted decoder coefficients.
 
-`nntc_view` shows the result on a real Direct3D 11 sampler, so what you see is what an application would see.
+Importantly, this method is compatible with normal GPU texture hardware bilinear, trilinear, and anisotropic filtering.
+
+The `nntc_view` is a small Windows D3D11 viewer that loads the .json and .dds files and displays the sampled and decoded results on a quad or a cubemap. The "N" key cycles between the decoded material textures.
 
 ## What it does
 
