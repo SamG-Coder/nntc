@@ -25,7 +25,7 @@ Importantly, this method is compatible with normal GPU texture hardware bilinear
   `--mips 0` writes one level each.
 * **The output descriptor** is `NAME_nntc.json`, beside `NAME_lat0.dds` and `NAME_lat1.dds`. The `_nntc` suffix is there
   so that a name taken from an input can never be the input; `-o` decides where they land (see **Encoding**).
-* **Output size in bits**: the default layout (two channels in latent 0, four in latent 1) costs 10 bits per pixel at the base, 13.3
+* **Output size in bits**: the default layout (two channels in latent 0, four in latent 1) costs 10 bits per pixel at the base mipmap level, or 13.3 bpp
   with mipmaps, **for the whole material, whatever its texture count**. Every texture shares the same files, so the
   per-texture figure with mipmaps is that 13.3 divided by however many there are: 3.3 bits per pixel per texture at
   four, 2.2 at the cap of six.
