@@ -310,6 +310,7 @@ the method, `docs/MATHEMATICS.md` the notes for whoever changes it, `PRIOR_ART_D
   planes (two or three `.dds` textures) as four do, so more textures means fewer bits per texture.
 * Encoding needs an NVIDIA GPU (compute capability 8.0 or newer). Decoding does not.
 * No entropy coding: an asset's size is fixed by its layout.
+* The less correlated the inputs, the more channels needed to avoid crosstalk between textures.
 
 ## Licences
 
