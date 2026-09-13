@@ -1,7 +1,9 @@
 # Prior art disclosure: NNTC (Not Neural Texture Compression), its encoder, asset format and viewer
 
-Richard Geldreich, 2026-09-12. NNTC, Not Neural Texture Compression, is a texture and material compressor whose
-encoder is `nntc_encode` and whose reference decoder is the Direct3D 11 viewer `nntc_view`. This file is a public,
+Richard Geldreich, 2026-09-12. NNTC, "Not Neural Texture Compression", is a texture and material compressor whose
+encoder is `nntc_encode` and whose reference decoder is the Direct3D 11 viewer `nntc_view`. NNTC is a bilinear latent material codec with analysis-by-synthesis block encoding.
+
+This file is a public,
 dated description of every algorithm, technique and method in this tree, written so that a graphics programmer could
 reproduce the system from it. It covers the encoder (`src/`), the decoder as it runs on a GPU (`viewer/`), the asset
 format (`docs/FORMAT.md`), the choice of BC4 / BC5, and the techniques that follow naturally from the design and have
