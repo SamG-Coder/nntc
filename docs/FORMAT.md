@@ -21,8 +21,9 @@ When level 0 has three or four channels and is block-compressed (the default), i
 `PREFIX_lat0a.dds` and `PREFIX_lat0b.dds`, in place of `PREFIX_lat0.dds`. Four channels put 0-1 in the first and 2-3 in
 the second, both `BC5_UNORM`; **three put 0-1 in a `BC5_UNORM` and channel 2 alone in a `BC4_UNORM`**, so the two files
 do not share a format and level 0 costs 12 bits per texel rather than the 16 a padded fourth channel would. Section 7
-has the rule and the JSON says which case it is, per file. The `.dds` files always sit beside the descriptor, and the
-descriptor names them by base name alone.
+has the rule and the JSON says which case it is, per file. The encoder writes the `.dds` files beside the descriptor and names
+them by base name alone; a reader takes a name that is an absolute path as written and any other name from the
+descriptor's own directory, so a hand-authored descriptor may point anywhere.
 
 The descriptor is `PREFIX_nntc.json`, not `PREFIX.json`: the prefix is usually an input's own base name, and a
 descriptor of `PREFIX.json` written beside a material named `PREFIX.json` would have been written over it. `-o` may

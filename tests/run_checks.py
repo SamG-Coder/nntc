@@ -2234,19 +2234,24 @@ def review_fix_checks(encode, build_dir):
         beside = write_material(os.path.join(tmp, 'beside.json'), [{'file': 'c0.png'}, {'file': 'c1.png'}])
 
         # (1) THE MATERIAL IS NOT THE ASSET'S DESCRIPTOR. The descriptor is PREFIX_nntc.json, so a material encoded
-        # beside its own asset - no -o at all, or -o naming the directory the material is already in - no longer names
-        # it, and the run goes through: the material is read back afterwards to prove it was not touched, and the
-        # descriptor lands under the _nntc name next to it.
+        # into its own directory (-o naming the directory the material is in) no longer names it, and the run goes
+        # through: the material is read back afterwards to prove it was not touched, and the descriptor lands under
+        # the _nntc name next to it. With no -o at all the asset lands in the CURRENT DIRECTORY (the gate's root), so
+        # that run is checked there and its three files taken away again.
         for extra in ([], ['-o', tmp + os.sep]):
             good = run([encode, beside, '--png', '0', '--quiet'] + extra)
             if good.returncode != 0:
-                raise SystemExit('FAIL: a material beside its own asset must encode now that the descriptor takes '
-                                 'the _nntc suffix (%d)' % good.returncode)
+                raise SystemExit('FAIL: a material encoded with no -o or into its own directory must encode (%d)'
+                                 % good.returncode)
             entries = json.load(open(beside))
             if not isinstance(entries, list) or len(entries) != 2:
                 raise SystemExit('FAIL: the run overwrote the material itself')
-            if not os.path.isfile(os.path.join(tmp, 'beside_nntc.json')):
-                raise SystemExit('FAIL: the descriptor beside the material must be beside_nntc.json')
+            where = tmp if extra else ROOT
+            if not os.path.isfile(os.path.join(where, 'beside_nntc.json')):
+                raise SystemExit('FAIL: the descriptor must be beside_nntc.json in %s' % ('the directory of the material' if extra else 'the current directory'))
+            if not extra:
+                for name in ('beside_lat0.dds', 'beside_lat1.dds', 'beside_nntc.json'):
+                    os.remove(os.path.join(ROOT, name))
         # The refusal is the backstop for the spelling that CAN still name the material: -o giving a .json is the
         # descriptor outright, so `-o material.json` would write the asset over the material that described the run.
         bad = run([encode, beside, '-o', beside, '--png', '0'])
@@ -2258,8 +2263,8 @@ def review_fix_checks(encode, build_dir):
         ok = run([encode, beside, '-o', os.path.join('out', 'review_elsewhere'), '--png', '0', '--quiet'])
         if ok.returncode != 0:
             raise SystemExit('FAIL: the same material into a different directory must encode (%d)' % ok.returncode)
-        print('  the review: a material beside its own asset now writes beside_nntc.json and survives it; -o naming '
-              'the material itself is still refused; -o elsewhere runs')
+        print('  the review: a material encoded with no -o writes beside_nntc.json in the current directory, into its own '
+              'directory beside itself, and survives both; -o naming the material itself is still refused; -o elsewhere runs')
 
         # (2) A WEIGHT NO FLOAT CHANNEL WEIGHT CAN HOLD. 1e300 is a perfectly good double and an infinity as a float,
         # and the run used to go all the way to a written asset with every progress line reading psnr 100.00. The
@@ -2719,12 +2724,12 @@ def alpha_input_checks(encode):
 
 
 def bare_command_check(encode):
-    """`nntc_encode tests/tiny.png` with nothing else: the everyday command line. It must write the asset beside the
-    input under the input's own base name, with the layout the defaults promise, and then be cleaned up again so the
-    tests directory carries nothing but tiny.png."""
-    # What was in tests/ BEFORE the run: only the files this command adds are removed afterwards, so a scratch file
-    # someone left in the directory survives a check run rather than being deleted by it.
-    before = set(os.listdir(os.path.join(ROOT, 'tests')))
+    """`nntc_encode tests/tiny.png` with nothing else: the everyday command line. It must write the asset in the
+    CURRENT DIRECTORY (the gate runs every command from the tree's root) under the input's own base name, with the
+    layout the defaults promise, and then be cleaned up again so the root carries nothing it did not before."""
+    # What was in the root BEFORE the run: only the files this command adds are removed afterwards, so a scratch file
+    # someone left there survives a check run rather than being deleted by it.
+    before = set(os.listdir(ROOT))
     made = []
     try:
         proc = run([encode, os.path.join('tests', 'tiny.png')])
@@ -2732,13 +2737,15 @@ def bare_command_check(encode):
             raise SystemExit('FAIL: nntc_encode with no flags returned %d' % proc.returncode)
         expected = ['tiny_lat0.dds', 'tiny_lat1.dds', 'tiny_nntc.json']
         for name in expected:
-            path = os.path.join(ROOT, 'tests', name)
+            path = os.path.join(ROOT, name)
             if not os.path.isfile(path):
-                raise SystemExit('FAIL: the bare command did not write tests/%s' % name)
-        for name in os.listdir(os.path.join(ROOT, 'tests')):
+                raise SystemExit('FAIL: the bare command did not write %s in the current directory' % name)
+        if os.path.exists(os.path.join(ROOT, 'tests', 'tiny_nntc.json')):
+            raise SystemExit('FAIL: the bare command wrote beside the input instead of in the current directory')
+        for name in os.listdir(ROOT):
             if name not in before:
-                made.append(os.path.join(ROOT, 'tests', name))
-        meta = json.load(open(os.path.join(ROOT, 'tests', 'tiny_nntc.json')))
+                made.append(os.path.join(ROOT, name))
+        meta = json.load(open(os.path.join(ROOT, 'tiny_nntc.json')))
         if meta['textures'][0]['dxgi_format_id'] != 83 or meta['decoder']['C0'] != 2 or meta['decoder']['C1'] != 4:
             raise SystemExit('FAIL: the defaults are not C0 2 / C1 4 with a BC5 level 0')
         # The default level-0 mode is --l0 bc8: a continuous 8-bit plane on a per-channel range, packed and refined.
@@ -2746,15 +2753,12 @@ def bare_command_check(encode):
             raise SystemExit('FAIL: the default level 0 is not the continuous 8-bit plane of --l0 bc8')
         if 'analysis by synthesis' not in proc.stdout:
             raise SystemExit('FAIL: the default run must refine the pack')
-        print('  the bare command: tests/tiny_lat0.dds, tests/tiny_lat1.dds and tests/tiny_nntc.json, BC5 level 0 at 8 '
-              'bits, the pack refined')
+        print('  the bare command: tiny_lat0.dds, tiny_lat1.dds and tiny_nntc.json in the current directory, BC5 level 0 '
+              'at 8 bits, the pack refined')
     finally:
         for path in made:
-            try:
+            if os.path.isfile(path):
                 os.remove(path)
-            except OSError:
-                pass
-
 
 def determinism_check(encode):
     """Two encodes of one image with one command line must produce byte-identical files.
@@ -3097,7 +3101,7 @@ def main():
     absolute_path_check(encode, build_dir)
     never_delete_check(encode)
     argument_and_status_checks(encode)
-    record('the bare command line', 'writes the three files beside the input, with the default layout')
+    record('the bare command line', 'writes the three files in the current directory, with the default layout')
 
     determinism_check(encode)
     diag_and_16bit_checks(encode)

@@ -82,7 +82,7 @@ in the last bit between platforms, so those runs agree across platforms in PSNR 
 ## Encoding
 
 ```
-nntc_encode albedo.png                          -> albedo_lat0.dds, albedo_lat1.dds, albedo_nntc.json beside the input
+nntc_encode albedo.png                          -> albedo_lat0.dds, albedo_lat1.dds, albedo_nntc.json in the current directory
 nntc_encode albedo.png normal.png rough.png     -> a 3-texture material, named after the first input
 nntc_encode a.png b.png -o out/                 -> the same files under out/
 nntc_encode a.png b.png --weights 2,1           -> the first texture matters twice as much

@@ -260,7 +260,7 @@ static void usage()
     printf("format stb_image reads: PNG, JPEG, TGA, BMP, PSD, GIF, HDR, PIC, PNM. Three channels each; an alpha\n");
     printf("channel is ignored with a warning.\n");
     printf("The asset is PREFIX_lat0.dds (or _lat0a and _lat0b), PREFIX_lat1.dds and PREFIX_nntc.json; the default\n");
-    printf("PREFIX is the first input's base name beside the input itself.\n\n");
+    printf("PREFIX is the first input's base name (or the material's) in the current directory.\n\n");
     printf("A MATERIAL JSON names the inputs and their per-texture settings instead, and the asset then takes the\n");
     printf("JSON's own base name. It is one array in texture order, a relative \"file\" resolving against the JSON:\n\n");
     printf("  [ { \"file\": \"albedo.png\", \"type\": \"albedo\", \"filter\": \"mitchell\", \"srgb\": true },\n");
@@ -1175,8 +1175,10 @@ static bool validate_options(Options& o)
         const std::string base = first.stem().string();
         const bool prefix_given = !o.prefix.empty();
         bool bare_name_prefix = false;   // -o out/name, with no extension and no file of that name: a directory
+        // With no -o the asset lands in the CURRENT DIRECTORY under the input's (or the material's) stem, the way a
+        // command-line tool is expected to behave; it used to land beside the input, which surprised the owner.
         if (!prefix_given)
-            o.prefix = (first.parent_path() / base).string();
+            o.prefix = base;
         else
         {
             const char last = o.prefix[o.prefix.size() - 1];
@@ -1218,11 +1220,9 @@ static bool validate_options(Options& o)
                     tidy_path(o.desc).c_str(), tidy_path(o.json_path).c_str());
             return false;
         }
-        // WITHOUT -o there is no output directory to make: the prefix is the input's own directory and the input's
-        // stem, and that directory exists if and only if the input does. Creating it here would create the directory
-        // of a path that is about to fail to open - `nntc_encode missing/x.png` used to leave a missing/ behind - and
-        // refusing it under --no-mkdir would report the wrong thing, an output directory, for an input that is not
-        // there. Both are skipped, and the run's first complaint is the one that fits: it cannot read the input.
+        // WITHOUT -o there is no output directory to make: the prefix is the input's stem in the current directory,
+        // which exists. Nothing is created and nothing is refused here, so a missing input's first complaint is the
+        // one that fits: it cannot read the input.
         if (prefix_given)
         {
             const std::filesystem::path dir = std::filesystem::path(o.prefix).parent_path();
