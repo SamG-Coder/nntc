@@ -23,7 +23,7 @@ Importantly, this method is compatible with normal GPU texture hardware bilinear
   `NAME_lat0b.dds`, at 3 or 4 channels), `NAME_lat1.dds` (a quarter-resolution 8-bit texture) and `NAME_nntc.json`
   (the sizes, the per-channel ranges of both levels and the decoder's weights). Every texture carries its mipmaps;
   `--mips 0` writes one level each.
-* **The descriptor** is `NAME_nntc.json`, beside `NAME_lat0.dds` and `NAME_lat1.dds`. The `_nntc` suffix is there
+* **The output descriptor** is `NAME_nntc.json`, beside `NAME_lat0.dds` and `NAME_lat1.dds`. The `_nntc` suffix is there
   so that a name taken from an input can never be the input; `-o` decides where they land (see **Encoding**).
 * **Size**: the default layout (two channels in latent 0, four in latent 1) costs 10 bits per pixel at the base, 13.3
   with mipmaps, **for the whole material, whatever its texture count** -- every texture shares the same files, so the
