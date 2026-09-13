@@ -31,6 +31,7 @@
 #include "nntc_json.h"
 #include <cstdio>
 #include <string>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -194,8 +195,10 @@ static bool check_blocks(const Dds& d, const int* bits, int channel_base, const 
 static std::vector<std::string> texture_files(const std::string& dir, const JVal& t) {
     std::vector<std::string> names;
     const JVal* files = t.get("files");
-    if (files && files->kind == JVal::ARR) { for (const JVal& f : files->arr) names.push_back(dir + (f.kind == JVal::OBJ ? f.string("file") : f.str)); }
-    else names.push_back(dir + t.string("file"));
+    // An absolute path in the descriptor is taken as written; a relative one is beside the descriptor.
+    const auto beside = [&dir](const std::string& name) { return std::filesystem::path(name).is_absolute() ? name : dir + name; };
+    if (files && files->kind == JVal::ARR) { for (const JVal& f : files->arr) names.push_back(beside(f.kind == JVal::OBJ ? f.string("file") : f.str)); }
+    else names.push_back(beside(t.string("file")));
     return names;
 }
 

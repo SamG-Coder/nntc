@@ -199,7 +199,9 @@ def read_texture(directory, tex):
     """
     entries = tex['files'] if 'files' in tex else [tex['file']]
     names = [e['file'] if isinstance(e, dict) else e for e in entries]
-    parts = [read_dds(os.path.join(directory, n)) for n in names]
+    # An absolute path in the descriptor is taken as written; a relative one is beside the descriptor (os.path.join
+    # already discards the directory when the name is absolute, which is exactly that rule).
+    parts = [read_dds(n if os.path.isabs(n) else os.path.join(directory, n)) for n in names]
     compressed = parts[0][2] in (80, 83)
     for _, _, dxgi in parts:
         assert (dxgi in (80, 83)) == compressed, 'a level is block-compressed in every file or in none'

@@ -28,6 +28,9 @@ directory or from beside the executable, so it can be edited and reloaded with `
 
 ## Running
 
+`nntc_view` returns 0 on success and 1 on any error: an unreadable descriptor, an unknown flag, a malformed value,
+a Direct3D object that could not be created, or a `--shot` frame that could not be written.
+
 ```
 build\Release\nntc_view.exe <PREFIX_nntc.json>
 ```

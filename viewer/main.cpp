@@ -32,6 +32,7 @@
 #include <d3dcompiler.h>
 
 #include <cstdio>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -117,14 +118,17 @@ static bool                     g_bc = false;   // the level-0 textures bound: f
 // Level 1's sampler set: the same three filters with MipLODBias = log2(block), so the hardware picks level 1's mip as the encoder's 1:1
 // rule does (output mip m reads mip m of both latents). Level 1 has a quarter of the texels per axis (block 4), so its natural LOD is 2 below
 // level 0's; the bias of +2 lines them up (at 1:1 on screen its LOD becomes 0, still mip 0; at level 0's mip 3 it reads its own mip 3).
-static void make_level1_samplers(int block, float bias) {
+// The bias is part of the format's contract (docs/FORMAT.md section 5), so a sampler that could not be created is a
+// failure of the load and not something to render around: the caller stops.
+static bool make_level1_samplers(int block, float bias) {
     for (int mips = 0; mips < 2; mips++) for (int f = 0; f < FILTER_STATES; f++) {
         safe_release(g_samplers1[mips][f]);
         if (!g_samplers[mips][f]) continue;
         D3D11_SAMPLER_DESC sd{}; g_samplers[mips][f]->GetDesc(&sd); sd.MipLODBias = bias;
-        if (FAILED(g_dev->CreateSamplerState(&sd, &g_samplers1[mips][f]))) fprintf(stderr, "ERROR: level 1's sampler state could not be created\n");
+        if (FAILED(g_dev->CreateSamplerState(&sd, &g_samplers1[mips][f]))) { fprintf(stderr, "ERROR: level 1's sampler state could not be created\n"); return false; }
     }
     printf("  level 1 sampler: MipLODBias +%.0f (the JSON's lod_bias_level1, log2 of block %d): the 1:1 mip rule; key L toggles it\n", bias, block);
+    return true;
 }
 
 // The asset: one latent texture per level.
@@ -406,6 +410,12 @@ static bool load_asset(const std::string& json_path) {
     else if (root.string("format") != "nntc-dds-1") { fprintf(stderr, "ERROR: unknown format '%s' (expected nntc-dds-1)\n", root.string("format").c_str()); return false; }
     printf("Loading %s\n", json_path.c_str());
     const size_t slash = json_path.find_last_of("/\\"); const std::string dir = slash == std::string::npos ? "" : json_path.substr(0, slash + 1);
+    // A file the descriptor names is taken as written when it is an absolute path, and from the descriptor's own
+    // directory otherwise: the encoder writes base names, and a hand-authored descriptor may point anywhere.
+    const auto beside = [&dir](const std::string& name) {
+        const std::filesystem::path p(name);
+        return p.is_absolute() ? name : dir + name;
+    };
     const JVal* src = root.get("source"); const JVal* decs = root.get("decode");
     g.src_w = src ? (int)src->number("width") : 0; g.src_h = src ? (int)src->number("height") : 0;
     g.textures_out = decs ? (int)decs->number("textures_out", 1) : 1; g.block = (int)root.number("block", 4);
@@ -446,7 +456,7 @@ static bool load_asset(const std::string& json_path) {
                 want_dxgi[i] = e.kind == JVal::OBJ ? (int)e.number("dxgi_format_id", 0) : 0;      // 0 = the older spelling: nothing published to cross-check
                 want_stored[i] = e.kind == JVal::OBJ ? (int)e.number("channels_stored", 0) : 0;
             }
-            if (!load_dds(dir + names[0], L) || !load_dds(dir + names[1], L, true)) return false;
+            if (!load_dds(beside(names[0]), L) || !load_dds(beside(names[1]), L, true)) return false;
             L.file_files = 2;
             const int got_dxgi[2] = { L.dxgi, L.dxgi_b }, got_stored[2] = { L.stored_C, L.stored_C_b };
             for (int i = 0; i < 2; i++)
@@ -455,7 +465,7 @@ static bool load_asset(const std::string& json_path) {
                             l, names[i].c_str(), want_dxgi[i], want_stored[i], got_dxgi[i], got_stored[i]);
                     return false;
                 }
-        } else if (!load_dds(dir + t.string("file"), L)) return false;
+        } else if (!load_dds(beside(t.string("file")), L)) return false;
         // The channels the level's files hold between them: one file stores stored_C, two store stored_C + stored_C_b (2 + 1 for a
         // three-channel BC level 0, which is exactly the three the decoder reads).
         const int stored_all = L.stored_C + (L.file_files > 1 ? L.stored_C_b : 0);
@@ -470,7 +480,7 @@ static bool load_asset(const std::string& json_path) {
         // Level 1's LOD-biased samplers (key L). The bias is the JSON's own lod_bias_level1, which is what the format
         // says the sampler must carry; log2(block) is only the value the writer puts there, and a file that ever said
         // something else would mean it.
-        if (l == 1) make_level1_samplers(g.block, (float)root.number("lod_bias_level1", (double)g.block > 1 ? 2.0 : 0.0));
+        if (l == 1 && !make_level1_samplers(g.block, (float)root.number("lod_bias_level1", (double)g.block > 1 ? 2.0 : 0.0))) return false;
         const JVal* dq = t.get("dequantise"); const JVal* lo = dq ? dq->get("lo") : nullptr; const JVal* hi = dq ? dq->get("hi") : nullptr;
         if (!lo || !hi || lo->kind != JVal::ARR || hi->kind != JVal::ARR || (int)lo->arr.size() < L.C || (int)hi->arr.size() < L.C) { fprintf(stderr, "ERROR: level %d: no lo / hi per channel\n", l); return false; }
         for (int c = 0; c < L.C; c++) { L.lo[c] = (float)lo->arr[c].num; L.hi[c] = (float)hi->arr[c].num; }
@@ -846,25 +856,42 @@ static void viewer_usage(const char* exe) {
     printf("  The shader is loaded from nntc_view.hlsl in the working directory (or next to the executable).\n");
 }
 
+// A numeric flag's value must be the whole argument and finite: `--tex nope` used to be texture 0 through atoi, which
+// is the kind of silent acceptance the encoder refuses, and the viewer refuses it the same way.
+static bool parse_number(const char* text, double& out) {
+    char* end = nullptr; errno = 0; const double v = strtod(text, &end);
+    if (end == text || *end != '\0' || errno == ERANGE || !std::isfinite(v)) return false;
+    out = v; return true;
+}
+static bool parse_integer(const char* text, int& out) {
+    char* end = nullptr; errno = 0; const long v = strtol(text, &end, 10);
+    if (end == text || *end != '\0' || errno == ERANGE || v < -1000000 || v > 1000000) return false;
+    out = (int)v; return true;
+}
+
 int main(int argc, char** argv) {
     std::string json_path, shot_path;   // --shot FILE.bmp: render one frame (with --cube, --z F, --yaw F, --tex N) to a .bmp and exit (a check without a desktop)
     for (int i = 1; i < argc; i++) { std::string a = argv[i];
         if (a == "--help" || a == "-h") { viewer_usage(argv[0]); return 0; }   // asking for the usage is not a refusal
-        else if (a == "--shot" && i + 1 < argc) { shot_path = argv[++i]; g_shot = true; }
+        else if (a == "--shot") { if (i + 1 >= argc) { fprintf(stderr, "ERROR: --shot needs a file name\n"); return 1; } shot_path = argv[++i]; g_shot = true; }
         else if (a == "--cube") g.cube = true;
         else if (a == "--nomips") g.mips_on = false;   // the key M state for --shot
         else if (a == "--nobias") g.lod_bias = false;   // the key L state for --shot
         else if (a == "--noaniso") g.aniso = false;   // the key X state for --shot
         else if (a == "--renorm") g.const0[3] = 1.0f;   // the key V state for --shot
-        else if (a == "--z" && i + 1 < argc) g.z = (float)atof(argv[++i]);
-        else if (a == "--yaw" && i + 1 < argc) g.yaw = (float)atof(argv[++i]);
-        else if (a == "--pitch" && i + 1 < argc) g.pitch = (float)atof(argv[++i]);
-        else if (a == "--tex" && i + 1 < argc) g.tex_shown = atoi(argv[++i]);
+        else if (a == "--z" || a == "--yaw" || a == "--pitch") {
+            double v; if (i + 1 >= argc || !parse_number(argv[i + 1], v)) { fprintf(stderr, "ERROR: %s needs a number, not '%s'\n", a.c_str(), i + 1 < argc ? argv[i + 1] : ""); return 1; }
+            i++; if (a == "--z") g.z = (float)v; else if (a == "--yaw") g.yaw = (float)v; else g.pitch = (float)v; }
+        else if (a == "--tex") {
+            int v; if (i + 1 >= argc || !parse_integer(argv[i + 1], v)) { fprintf(stderr, "ERROR: --tex needs a texture index, not '%s'\n", i + 1 < argc ? argv[i + 1] : ""); return 1; }
+            i++; g.tex_shown = v; }
         else if (a == "--bc") g_bc = true;
         else if (a == "--nooverlay") g_overlay = false;
         else if (a == "--raw0") g.const0[0] = 1.0f;
         else if (a == "--raw1") g.const0[1] = 1.0f;
-        else if (!a.empty() && a[0] == '-') fprintf(stderr, "WARNING: ignoring unknown option '%s'\n", a.c_str()); else if (json_path.empty()) json_path = a; }
+        else if (!a.empty() && a[0] == '-') { fprintf(stderr, "ERROR: unknown option '%s'\n", a.c_str()); viewer_usage(argv[0]); return 1; }
+        else if (json_path.empty()) json_path = a;
+        else { fprintf(stderr, "ERROR: one descriptor only; '%s' is a second\n", a.c_str()); return 1; } }
     // Nothing is printed about the run's state before it is known that there IS a run: named no asset, the program owes
     // the caller the usage and nothing else.
     if (json_path.empty()) {
@@ -947,17 +974,17 @@ int main(int argc, char** argv) {
 
     {
         D3D11_RASTERIZER_DESC rd{}; rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
-        g_dev->CreateRasterizerState(&rd, &g_raster);
+        if (FAILED(g_dev->CreateRasterizerState(&rd, &g_raster))) { fprintf(stderr, "ERROR: the rasterizer state could not be created\n"); return 1; }
         D3D11_DEPTH_STENCIL_DESC dd{};
         dd.DepthEnable = TRUE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; dd.DepthFunc = D3D11_COMPARISON_LESS;
-        g_dev->CreateDepthStencilState(&dd, &g_depth_on);
+        if (FAILED(g_dev->CreateDepthStencilState(&dd, &g_depth_on))) { fprintf(stderr, "ERROR: the depth-on state could not be created\n"); return 1; }
         dd.DepthEnable = FALSE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
-        g_dev->CreateDepthStencilState(&dd, &g_depth_off);
+        if (FAILED(g_dev->CreateDepthStencilState(&dd, &g_depth_off))) { fprintf(stderr, "ERROR: the depth-off state could not be created\n"); return 1; }
         D3D11_BLEND_DESC bd{};
         bd.RenderTarget[0].BlendEnable = TRUE; bd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA; bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
         bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD; bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE; bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
         bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD; bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-        g_dev->CreateBlendState(&bd, &g_blend_alpha);
+        if (FAILED(g_dev->CreateBlendState(&bd, &g_blend_alpha))) { fprintf(stderr, "ERROR: the blend state could not be created\n"); return 1; }
         // Four sampler states (P/B/T and T with anisotropy), all CLAMP: the encoder fits the taps clamped at the edges.
         // Every field is set: a zeroed D3D11_SAMPLER_DESC has ComparisonFunc 0, which is not a legal value, and
         // MaxAnisotropy 0, which is not one either - the runtime accepts both because it ignores them for these
@@ -977,9 +1004,11 @@ int main(int argc, char** argv) {
             }
         }
         D3D11_BUFFER_DESC cbd{}; cbd.ByteWidth = sizeof(CBData); cbd.Usage = D3D11_USAGE_DYNAMIC; cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        g_dev->CreateBuffer(&cbd, nullptr, &g_cbuffer);
+        // Both constant buffers are checked: a decoder constant buffer that failed to create would leave the shader
+        // decoding with whatever the slot holds and render a wrong picture rather than fail.
+        if (FAILED(g_dev->CreateBuffer(&cbd, nullptr, &g_cbuffer))) { fprintf(stderr, "ERROR: the scene constant buffer could not be created\n"); return 1; }
         cbd.ByteWidth = sizeof(DecCB);
-        g_dev->CreateBuffer(&cbd, nullptr, &g_dec_cbuffer);
+        if (FAILED(g_dev->CreateBuffer(&cbd, nullptr, &g_dec_cbuffer))) { fprintf(stderr, "ERROR: the decoder constant buffer could not be created\n"); return 1; }
     }
 
     g.shader_path = "nntc_view.hlsl";
@@ -1056,7 +1085,8 @@ int main(int argc, char** argv) {
             if (FAILED(g_dev->CreateTexture2D(&td, nullptr, &st)) || !st) { fprintf(stderr, "ERROR: --shot could not create the staging texture\n"); safe_release(bb); return 1; }
             g_ctx->CopyResource(st, bb);
             D3D11_MAPPED_SUBRESOURCE map{};
-            if (SUCCEEDED(g_ctx->Map(st, 0, D3D11_MAP_READ, 0, &map))) {
+            if (FAILED(g_ctx->Map(st, 0, D3D11_MAP_READ, 0, &map))) { fprintf(stderr, "ERROR: --shot could not map the staging texture\n"); safe_release(st); safe_release(bb); return 1; }
+            {
                 const int W = (int)td.Width, H = (int)td.Height, pitch = (W * 3 + 3) & ~3;
                 std::vector<uint8_t> out((size_t)pitch * H, 0);
                 for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { const uint8_t* sp = (const uint8_t*)map.pData + (size_t)y * map.RowPitch + (size_t)x * 4; uint8_t* op = &out[(size_t)(H - 1 - y) * pitch + (size_t)x * 3]; op[0] = sp[2]; op[1] = sp[1]; op[2] = sp[0]; }
@@ -1064,7 +1094,13 @@ int main(int argc, char** argv) {
                 const uint32_t fsz = 54 + (uint32_t)out.size(); uint8_t hdr[54] = { 'B', 'M' }; uint32_t v;
                 v = fsz; memcpy(hdr + 2, &v, 4); v = 54; memcpy(hdr + 10, &v, 4); v = 40; memcpy(hdr + 14, &v, 4); v = (uint32_t)W; memcpy(hdr + 18, &v, 4); v = (uint32_t)H; memcpy(hdr + 22, &v, 4);
                 hdr[26] = 1; hdr[28] = 24; v = (uint32_t)out.size(); memcpy(hdr + 34, &v, 4);
-                FILE* f = fopen(shot_path.c_str(), "wb"); if (f) { fwrite(hdr, 1, 54, f); fwrite(out.data(), 1, out.size(), f); fclose(f); printf("wrote %s (%dx%d)\n", shot_path.c_str(), W, H); } else fprintf(stderr, "cannot write %s\n", shot_path.c_str());
+                // A shot that was not written is a failed run, with the exit code to say so: a script that checks a
+                // screenshot must not be told the frame exists when it does not.
+                FILE* f = fopen(shot_path.c_str(), "wb");
+                if (!f) { fprintf(stderr, "ERROR: cannot write %s\n", shot_path.c_str()); safe_release(st); safe_release(bb); return 1; }
+                const bool ok = fwrite(hdr, 1, 54, f) == 54 && fwrite(out.data(), 1, out.size(), f) == out.size();
+                if (fclose(f) != 0 || !ok) { fprintf(stderr, "ERROR: writing %s failed\n", shot_path.c_str()); safe_release(st); safe_release(bb); return 1; }
+                printf("wrote %s (%dx%d)\n", shot_path.c_str(), W, H);
             }
             safe_release(st); safe_release(bb);
             break;

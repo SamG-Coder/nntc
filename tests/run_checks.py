@@ -2953,6 +2953,75 @@ def never_delete_check(encode):
     print('  never deleting: three planted stale siblings survived the run byte for byte')
 
 
+def viewer_refusal_checks(encode, build_dir):
+    """The viewer refuses what the encoder refuses: an unknown flag, a malformed number, a flag with no value, and a
+    --shot it could not write all exit 1 with an ERROR line, and a refused --shot writes no file. --tex outside the
+    material stays a warning with texture 0 shown, which the six-texture case asserts."""
+    if os.name != 'nt':
+        record('the viewer refusals', 'skipped (Windows only)')
+        return
+    view = executable(build_dir, 'nntc_view')
+    odir, prefix = out_asset('tiny_view_refuse')
+    proc = run([encode, os.path.join('tests', 'tiny.png'), '-o', odir, '--png', '0', '--quiet'])
+    if proc.returncode != 0:
+        raise SystemExit('FAIL: the encode for the viewer refusals returned %d' % proc.returncode)
+    desc = prefix + '_nntc.json'
+    shot = os.path.join(odir, 'frame.bmp')
+    for label, extra, phrase in (('an unknown flag', ['--bogus'], 'unknown option'),
+                                 ('a malformed --tex', ['--tex', 'nope'], '--tex needs'),
+                                 ('a malformed --z', ['--z', '1.5x'], '--z needs'),
+                                 ('a --shot with no name', [], '--shot needs')):
+        cmd = [view, desc, '--nooverlay', '--shot', shot] + extra if label != 'a --shot with no name' else [view, desc, '--shot']
+        bad = run(cmd)
+        if bad.returncode != 1 or phrase not in bad.stderr:
+            raise SystemExit('FAIL: the viewer must refuse %s with exit 1 and %r, not %d %r'
+                             % (label, phrase, bad.returncode, bad.stderr[-200:]))
+    missing = os.path.join(odir, 'no_such_dir', 'frame.bmp')
+    bad = run([view, desc, '--nooverlay', '--shot', missing])
+    if bad.returncode != 1 or 'cannot write' not in bad.stderr or os.path.exists(missing):
+        raise SystemExit('FAIL: a --shot into a missing directory must exit 1 and write nothing, not %d %r'
+                         % (bad.returncode, bad.stderr[-200:]))
+    record('the viewer refusals', 'an unknown flag, a malformed number, a valueless --shot and an unwritable --shot all '
+           'exit 1; the refused shot writes no file')
+    print('  the viewer refusals: exit 1 on an unknown flag, a malformed number, a valueless --shot, an unwritable shot')
+
+
+def absolute_path_check(encode, build_dir):
+    """A descriptor may name its .dds files by an absolute path (a hand-authored one; the encoder writes base names),
+    and every reader takes an absolute path as written and a relative one from the descriptor's directory. The gate
+    rewrites a fresh descriptor's names to absolute paths, moves the descriptor to another directory, and opens it
+    with the Python decoder, the viewer and bc_check."""
+    odir, prefix = out_asset('tiny_abs_paths')
+    proc = run([encode, os.path.join('tests', 'tiny.png'), '-o', odir, '--png', '0', '--quiet'])
+    if proc.returncode != 0:
+        raise SystemExit('FAIL: the encode for the absolute-path case returned %d' % proc.returncode)
+    desc = prefix + '_nntc.json'
+    meta = json.load(open(desc))
+    for t in meta['textures']:
+        if 'file' in t:
+            t['file'] = os.path.abspath(os.path.join(ROOT, odir, t['file']))
+        for f in t.get('files', []):
+            f['file'] = os.path.abspath(os.path.join(ROOT, odir, f['file']))
+    elsewhere = os.path.join('out', 'tiny_abs_paths_elsewhere')
+    os.makedirs(elsewhere, exist_ok=True)
+    moved = os.path.join(elsewhere, 'moved_nntc.json')
+    with open(moved, 'w') as f:
+        json.dump(meta, f, indent=1)
+    proc = run([sys.executable, os.path.join('tools', 'dds_decode.py'), moved, '--grid'])
+    if proc.returncode != 0:
+        raise SystemExit('FAIL: the Python decoder must open a descriptor naming absolute paths, not %r' % proc.stdout[-300:])
+    if os.name == 'nt':
+        view = executable(build_dir, 'nntc_view')
+        frame, err = shot(view, moved, os.path.join(elsewhere, 'shot.bmp'), [])
+        check = executable(build_dir, 'bc_check')
+        proc = run([check, moved])
+        if proc.returncode != 0:
+            raise SystemExit('FAIL: bc_check must open a descriptor naming absolute paths, not %r' % proc.stderr[-300:])
+    record('absolute paths in a descriptor', 'taken as written by the Python decoder' + (', the viewer and bc_check' if os.name == 'nt' else '')
+           + '; relative names stay beside the descriptor')
+    print('  absolute paths in a descriptor: every reader takes them as written')
+
+
 def main():
     build_dir = os.path.join(ROOT, 'build')
     if '--build-dir' in sys.argv:
@@ -3024,6 +3093,8 @@ def main():
     six_texture_checks(encode, build_dir)
     bare_command_check(encode)
     old_format_check(encode, build_dir)
+    viewer_refusal_checks(encode, build_dir)
+    absolute_path_check(encode, build_dir)
     never_delete_check(encode)
     argument_and_status_checks(encode)
     record('the bare command line', 'writes the three files beside the input, with the default layout')

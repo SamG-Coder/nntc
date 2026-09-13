@@ -140,6 +140,42 @@ inline bool image_load_rgb(const std::string& path, Image& img, bool& alpha_igno
     return true;
 }
 
+// stb_image_write defines this one in its implementation but leaves it out of its header, so it is declared here for
+// the translation units that only see the header (the implementation lives in main.cpp).
+STBIWDEF unsigned char* stbi_write_png_to_mem(const unsigned char* pixels, int stride_bytes, int x, int y, int n,
+                                              int* out_len);
+
+// The PNG bytes are made in memory by stb and written by this tree's own checked write: stbi_write_png ignores a short
+// fwrite and reports success, and it opens the path with the narrow fopen. Here every write and the close are checked
+// (a full disk is an ERROR, not a PNG that looks written) and the path goes through image_fopen_utf8.
+inline bool image_write_png_checked(const std::string& path, int w, int h, const uint8_t* rgb)
+{
+    int len = 0;
+    unsigned char* png = stbi_write_png_to_mem(rgb, w * 3, w, h, 3, &len);
+    if (!png || len <= 0)
+    {
+        fprintf(stderr, "ERROR: could not encode '%s' as a PNG\n", path.c_str());
+        free(png);   // stb's buffer is malloc'ed unless STBIW_MALLOC was overridden, which this tree does not
+        return false;
+    }
+    FILE* f = image_fopen_utf8(path, "wb");
+    if (!f)
+    {
+        fprintf(stderr, "ERROR: cannot write '%s'\n", path.c_str());
+        free(png);   // stb's buffer is malloc'ed unless STBIW_MALLOC was overridden, which this tree does not
+        return false;
+    }
+    const bool ok = fwrite(png, 1, (size_t)len, f) == (size_t)len;
+    const bool closed = fclose(f) == 0;
+    free(png);   // stb's buffer is malloc'ed unless STBIW_MALLOC was overridden, which this tree does not
+    if (!ok || !closed)
+    {
+        fprintf(stderr, "ERROR: writing '%s' failed (a short write or a failed close: is the disk full?)\n", path.c_str());
+        return false;
+    }
+    return true;
+}
+
 // Write one texture of an nc = 3T image as an 8-bit RGB PNG, rounding each channel to the nearest byte.
 inline bool image_save_texture(const std::string& path, const Image& img, int texture, int crop_w, int crop_h)
 {
@@ -154,7 +190,7 @@ inline bool image_save_texture(const std::string& path, const Image& img, int te
                 const float s = std::min(1.0f, std::max(0.0f, f)) * 255.0f;
                 out[((size_t)y * cw + x) * 3 + c] = (uint8_t)std::lround(s);
             }
-    return stbi_write_png(path.c_str(), cw, ch, 3, out.data(), cw * 3) != 0;
+    return image_write_png_checked(path, cw, ch, out.data());
 }
 
 // Write an already-8-bit interleaved buffer (nc channels, one texture's triple taken out of it) as a PNG.
@@ -168,7 +204,7 @@ inline bool image_save_bytes(const std::string& path, const uint8_t* rgb, int w,
         for (int x = 0; x < cw; x++)
             for (int c = 0; c < 3; c++)
                 out[((size_t)y * cw + x) * 3 + c] = rgb[((size_t)y * w + x) * nc + 3 * texture + c];
-    return stbi_write_png(path.c_str(), cw, ch, 3, out.data(), cw * 3) != 0;
+    return image_write_png_checked(path, cw, ch, out.data());
 }
 
 // The sRGB transfer function and its inverse, on floats, in the IEC 61966-2-1 form. They are here rather than taken

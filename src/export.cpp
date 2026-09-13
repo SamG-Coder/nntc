@@ -121,14 +121,22 @@ static bool dds_write(const std::string& name, int w, int h, int dxgi, bool comp
         fprintf(stderr, "ERROR: cannot write '%s'\n", name.c_str());
         return false;
     }
-    fwrite(hdr, 4, 37, f);
+    // Every write and the close are checked: a full disk or a short write must be an ERROR and a failed run, not an
+    // asset that looks written and is not (the owner's rule for every file this tree writes).
+    bool ok = fwrite(hdr, 4, 37, f) == 37;
     bytes = 148;
     for (const std::vector<uint8_t>& level : levels)
     {
-        fwrite(level.data(), 1, level.size(), f);
+        ok = ok && fwrite(level.data(), 1, level.size(), f) == level.size();
         bytes += level.size();
     }
-    fclose(f);
+    if (fclose(f) != 0)
+        ok = false;
+    if (!ok)
+    {
+        fprintf(stderr, "ERROR: writing '%s' failed (a short write or a failed close: is the disk full?)\n", name.c_str());
+        return false;
+    }
     return true;
 }
 
@@ -786,8 +794,12 @@ bool write_asset(const Model& m, const std::string& prefix, const std::string& j
         fprintf(stderr, "ERROR: cannot write '%s'\n", jname.c_str());
         return false;
     }
-    fwrite(js.data(), 1, js.size(), jf);
-    fclose(jf);
+    const bool jok = fwrite(js.data(), 1, js.size(), jf) == js.size();
+    if (fclose(jf) != 0 || !jok)
+    {
+        fprintf(stderr, "ERROR: writing '%s' failed (a short write or a failed close: is the disk full?)\n", jname.c_str());
+        return false;
+    }
     sizes[2] = js.size();
     printf("wrote %s: the sizes, the bits per channel, the dequantisation of both levels and the decoder's one layer\n",
            display_path(jname).c_str());
