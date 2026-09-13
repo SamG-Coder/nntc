@@ -25,18 +25,18 @@ Importantly, this method is compatible with normal GPU texture hardware bilinear
   `--mips 0` writes one level each.
 * **The output descriptor** is `NAME_nntc.json`, beside `NAME_lat0.dds` and `NAME_lat1.dds`. The `_nntc` suffix is there
   so that a name taken from an input can never be the input; `-o` decides where they land (see **Encoding**).
-* **Size**: the default layout (two channels in latent 0, four in latent 1) costs 10 bits per pixel at the base, 13.3
-  with mipmaps, **for the whole material, whatever its texture count** -- every texture shares the same files, so the
+* **Output size in bits**: the default layout (two channels in latent 0, four in latent 1) costs 10 bits per pixel at the base, 13.3
+  with mipmaps, **for the whole material, whatever its texture count**. Every texture shares the same files, so the
   per-texture figure with mipmaps is that 13.3 divided by however many there are: 3.3 bits per pixel per texture at
   four, 2.2 at the cap of six.
-* **Speed**: about one second to about a minute on an RTX 5090, growing with the pixel count, the texture count and
+* **Encode Speed**: about one second to about a minute on an RTX 5090, growing with the pixel count, the texture count and
   the layout, with the top of that range as described below. Measured:
   1.3 s for four 512x512 textures at the default layout (`out/disclosure/log_m1234_default.txt`), 5.47 s for one
   2888x4320 image at `--l0 palette --c0 1 --bits0 4 --c1 2` (`out/s7/cmp/log_model34_c1b4_c2b8.txt`), 15.2 s for four
   2048x1024 textures at `--c0 4 --c1 4` (`out/timing/log_md1234_c4c4.txt`). Larger inputs take longer: four 4096x4096
   textures run on the order of a minute (seen during development; no log in the tree). It is a CUDA program; without
   an NVIDIA GPU it does not encode. The asset it writes decodes on any GPU.
-* **Quality**: fitted for the hardware filter, not texel by texel, so bilinear, trilinear and anisotropic sampling all
+* **Encode Quality**: fitted for the hardware filter, not texel by texel, so bilinear, trilinear and anisotropic sampling all
   reconstruct correctly. `docs/RESULTS.md` has the measurements.
 
 ## Building
