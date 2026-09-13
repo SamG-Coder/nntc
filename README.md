@@ -44,7 +44,7 @@ Importantly, this method is compatible with normal GPU texture hardware bilinear
 You need CMake, a C++17 compiler and the CUDA toolkit. CUDA 12.8 or newer is the minimum the build accepts; 13.4
 (VS 2026) and 13.3 (WSL) are what this tree is built and gated with.
 
-Windows, the toolchain this tree is developed and gated on -- **Visual Studio 2026 with CUDA 13.4** (CMake 4.2 or
+Windows, the toolchain this tree is developed on -- **Visual Studio 2026 with CUDA 13.4** (CMake 4.2 or
 newer; the CMake bundled with VS 2026 is fine):
 
 ```
@@ -61,9 +61,6 @@ cmake -B build -S . -G "Visual Studio 17 2022" -T cuda=13.1
 cmake --build build --config Release
 ```
 
-If CMake reports `The CUDA Toolkit directory '' does not exist`, the shell predates the CUDA install and lacks
-`CUDA_PATH_V13_4`: open a new one.
-
 Linux:
 
 ```
@@ -73,7 +70,9 @@ cmake --build build
 
 That produces `nntc_encode` only; the viewer is Direct3D 11 and Windows only. Verified under WSL 2 (Ubuntu 24.04,
 gcc 13.3, CUDA 13.3 from NVIDIA's `wsl-ubuntu` apt repository): the gate passes and the asset it writes is
-byte-identical to the Windows build's -- on the default source chain. A run whose mipmaps come from `stb_image_resize2` (a named filter, or the `box` implied by `srgb`, `edge` or
+byte-identical to the Windows build's -- on the default source chain. 
+
+Notes: A run whose mipmaps come from `stb_image_resize2` (a named filter, or the `box` implied by `srgb`, `edge` or
 `normal_map`) can differ
 in the last bit between platforms, so those runs agree across platforms in PSNR rather than byte for byte
 (`docs/DESIGN.md` section 6 has the measurement). Inside WSL, prefer the `cuda-toolkit-13-x` package: the `cuda` and
