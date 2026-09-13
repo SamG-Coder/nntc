@@ -322,7 +322,7 @@ the method, `docs/MATHEMATICS.md` the notes for whoever changes it, `PRIOR_ART_D
 | path | licence |
 |---|---|
 | everything that is not third-party code: `src/` (except the three stb headers and `src/json.h`), `tools/`, `tests/`, `docs/`, `CMakeLists.txt`, the READMEs, `PRIOR_ART_DISCLOSURE.md`, `viewer/main.cpp`, `viewer/bin/nntc_view.hlsl`, `viewer/bc_check.cpp` | **Apache License 2.0**, Copyright (C) 2026 Richard Geldreich Jr. (`LICENSE`) |
-| `src/json.h` | public domain (Unlicense), sheredom |
-| `viewer/bcdec.h` | MIT / Unlicense dual, iOrange |
-| `src/stb_image.h`, `src/stb_image_write.h`, `src/stb_image_resize2.h` | public domain / MIT dual, Sean Barrett |
+| `src/json.h` | public domain (Unlicense), [sheredom](https://github.com/sheredom/json.h) |
+| `viewer/bcdec.h` | MIT / Unlicense dual, [iOrange](https://github.com/iOrange/bcdec) |
+| `src/stb_image.h`, `src/stb_image_write.h`, `src/stb_image_resize2.h` | [public domain / MIT dual, Sean Barrett](https://github.com/nothings/stb) |
 | `examples/PavingStones141_1K-PNG_*.png` | CC0, the PavingStones141 material from [ambientCG](https://ambientcg.com); the other example textures are the author's |
