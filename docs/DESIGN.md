@@ -149,14 +149,24 @@ So the block measures instead of asserting, and it costs no objective pass to do
 
     Q(x) = sum_c cw[c] ( x_c^T A x_c - 2 x_c . rhs_c )
 
-differenced between two decoders is exactly the change in `E`'s weighted sum, and dividing by `sum(cw)` times the
-weighted site count gives the change in the `E` the round loop prints -- a few thousand double multiply-adds on numbers
-already on the host. The shipped ridge is tried first, so every run whose `A` is well conditioned gets exactly the
-decoder it always got, byte for byte; if that candidate raises `Q` by more than `Q`'s own rounding (`1e-12` in `E`'s
-units, five orders of magnitude under the effect measured above) the ridge and not the data is deciding the step, and
-`1e-12 * mean(diag A)` and then a zero ridge are tried in turn; if none of them clears the bar the decoder the block
-came in with is kept and the block takes no step. **Block (a) therefore guarantees that `E` does not rise across it --
-by construction, not by argument** -- and on the dot image above the fallbacks are what the loop needs rather than a
+differenced between two decoders is the change in `E`'s weighted sum -- up to the fp32 rounding of the features `A` and
+`rhs` were accumulated from, `E` itself being measured in double from the same planes, about 1e-12 in the printed units
+at a decoder norm of 300 -- and dividing by `sum(cw)` times the weighted site count gives the change in the `E` the
+round loop prints, a few thousand double multiply-adds on numbers already on the host. The shipped ridge is tried
+first, so every run whose `A` is well conditioned gets exactly the decoder it always got, byte for byte; if that
+candidate raises `Q` by more than `Q`'s own rounding (`1e-12` in `E`'s units, five orders of magnitude under the effect
+measured above) the ridge and not the data is deciding the step, and `1e-12 * mean(diag A)` and then a zero ridge are
+tried in turn; if none of them clears the bar the decoder the block came in with is kept and the block takes no step.
+
+`Q`'s rounding is bounded rather than assumed, because the lower rungs are reached precisely when `A` is near-singular
+and the solutions are large: beside each `Q` the block computes `eps mm (sum_ij |x_i| |a_ij| |x_j| + 2 sum_i |x_i|
+|rhs_i|)` in the same units, for the incoming decoder and the candidate both, and takes the candidate only when
+`dQ + err_prev + err_cand <= 1e-12`. At `|x|` of 1e6 to 1e8 the computed `dQ` is noise of random sign, and a comparison
+that cannot resolve the sign is a refusal, not a pass. A non-finite solve is refused before `Q` is evaluated. The
+report's `block (a) ridge:` line counts how many of the run's calls ended on each rung.
+
+**Block (a) therefore guarantees that `E` does not rise across it beyond the tolerance -- by construction, not by
+argument** -- and on the dot image above the fallbacks are what the loop needs rather than a
 mere safety net: it ends at `E` 4.627044e-07 and 60.46 dB where it ended at 1.268264e-06 and 53.69 dB before.
 `tests/run_checks.py` writes that image and encodes it as a gate.
 
@@ -306,8 +316,10 @@ rule then turns into a decision about whether a texel moves at all.
              one more level-0 search per plane against the values level 1 now holds
              ONE last block (a) over every plane, so W is optimal for what the asset holds
 
-Each block is the exact minimiser of `E` in its own variables with the other two held, so `E` is non-increasing across
-every one of them and the whole sequence is monotone by construction - a warning line naming the round and the block
+Each block minimises `E` in its own variables with the other two held - blocks (b) and (c) exactly, block (a) up to the
+ridge and the acceptance test of section 3.1, which is what makes "`E` does not rise across block (a) beyond the
+tolerance" the statement rather than "block (a) is the exact global minimiser" - so `E` is non-increasing across every
+one of them and the whole sequence is monotone by construction - a warning line naming the round and the block
 when one rises beyond the loose tolerance, never an assert and never a tuning knob. The one exception is block (b) of the round that freezes level 1's
 grid (section 5): snapping the plane onto the grid is a constraint being applied, not a step being taken, and a
 constraint can only cost `E`. The progress line carries all three values, the base's centre and sampled PSNR, the

@@ -81,14 +81,23 @@ endif()
 # The viewer: Direct3D 11, Windows only, plain C++17 with no dependency beyond the C runtime, Win32, d3d11 and d3dcompiler.
 # ---------------------------------------------------------------------------------------------------------------------
 if(WIN32)
+    # On Windows the narrow C and C++ APIs - main's argv, fopen, everything a path goes through - read the process's
+    # active code page, so a file named cafe with an accent could not be opened from the command line. The manifest
+    # declares that code page to be UTF-8 (honoured by Windows 10 1903 and later), and MSVC embeds a .manifest listed
+    # among a target's sources. All three executables get it.
+    set(NNTC_MANIFEST ${CMAKE_CURRENT_SOURCE_DIR}/nntc.manifest)
+    target_sources(nntc_encode PRIVATE ${NNTC_MANIFEST})
+
     # src/bc_pack.h is the one BC4 / BC5 encoder in the tree: the encoder packs level 0 with it and the viewer packs
     # an uncompressed level 0 with it at load, so the two produce the same bytes by construction.
     add_executable(nntc_view viewer/main.cpp src/bc_pack.h src/nntc_json.h src/json.h)
+    target_sources(nntc_view PRIVATE ${NNTC_MANIFEST})
     target_include_directories(nntc_view PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(nntc_view PRIVATE d3d11 d3dcompiler)
 
     # bc_check packs a .dds the way the viewer packs level 0 and decodes it with iOrange's bcdec (MIT / Unlicense).
     add_executable(bc_check viewer/bc_check.cpp src/bc_pack.h src/nntc_json.h src/json.h viewer/bcdec.h)
+    target_sources(bc_check PRIVATE ${NNTC_MANIFEST})
     target_include_directories(bc_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
     # The same warning level as the encoder. src/json.h and viewer/bcdec.h are vendored and are included with the

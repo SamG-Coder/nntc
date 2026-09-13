@@ -363,6 +363,12 @@ int stencil_monomials(int c0);
 // solve_decoder.cu
 double solve_decoder(DeviceModel* d, Model& m, int k, const std::vector<double>& per_site);
 
+// How the run's block (a) calls ended, counted since the process started: [0] took the shipped ridge, [1] the reduced
+// one, [2] no ridge at all, [3] refused every rung and kept the decoder it came in with. The report prints the four,
+// because which rung a run lands on is the difference between "the decoder it always got" and the near-singular arm,
+// and nothing else in the output says so.
+void decoder_ridge_tally(long long out[4]);
+
 // solve_level1.cu: block (b), the level-1 plane of one stored level as one sparse least squares.
 struct Level1Report
 {

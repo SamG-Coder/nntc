@@ -1715,8 +1715,9 @@ int main(int argc, char** argv)
     Level1InitReport init_rep;
     init_level1(d, m, o.init == "pca", init_rep);
 
-    // Block (a) is the exact global minimiser in (W, b) over the very sites E is measured on, so E cannot come out of
-    // it larger than it went in; a run that reports otherwise is reporting a bug, not a tuning problem.
+    // Block (a) measures its own step on the quadratic its normal equations already are, and refuses a candidate that
+    // raises it: E does not rise across block (a) beyond the tolerance. The shipped ridge is tried first, so a
+    // well-conditioned system gets the decoder it always got, bit for bit.
     Objective before, after, after_b, twin;
     objective_eval(d, m, o.k, mip_site, before);
     double ms_a = solve_decoder(d, m, o.k, mip_site);
@@ -2018,9 +2019,10 @@ int main(int argc, char** argv)
         // The comparison is relative AND carries an absolute floor. E is a float sum in [0,1] units, and on a picture the
         // representation reproduces exactly - an 8x8 of alternating columns, say - it sits at 1e-19 to 1e-17, which is
         // the rounding noise of the sum and not a measurement; a purely relative test then reads a step from 1.4e-19 to
-        // 1.6e-18 as a rise, warns in Release and aborts in Debug. There is a second, larger effect at that scale: block
-        // (a) minimises E plus a ridge of 1e-9 times the mean diagonal of its normal matrix, so once E is below about
-        // 1e-10 the ridge term and not E decides the step, and E can rise by that much (7e-15 to 8e-12 on the same 8x8).
+        // 1.6e-18 as a rise and warns for nothing. There is a second, larger effect at that scale: block (a) minimises
+        // E plus a ridge of 1e-9 times the mean diagonal of its normal matrix, and what it guarantees is that E does
+        // not rise across it BEYOND ITS OWN TOLERANCE - a tolerance in the units of E, so once E is below about 1e-10
+        // the ridge term and not E decides the step and E can rise by that much (7e-15 to 8e-12 on the same 8x8).
         // The tolerances are deliberately loose - a relative 1e-6 and an absolute E_NOISE of 1e-8, three orders of
         // magnitude under the smallest objective a real image reaches - because a check that trips on rounding is a
         // check nobody trusts; a real defect raises E by a fraction of itself, not by a billionth.
@@ -2358,8 +2360,9 @@ int main(int argc, char** argv)
         // Whatever the pack the asset ends up with - the post-fit step's, the last ACCEPTED outer pass's, or the one a
         // rejected pass's restore put back - level 1 and the decoder beside it are the ones that were fitted BEFORE
         // that pack. One block (b) on level 1's grid and one block (a) over every site fix that. Level 0 does not move
-        // here, so both are exact minimisations of E in their own variables over a fixed plane and the shipped E can
-        // only fall; it is two blocks of work and it is worth about a hundredth of a decibel.
+        // here, so both are minimisations of E in their own variables over a fixed plane: block (b) is exact, block (a)
+        // takes the step only if its own quadratic says E does not rise beyond the tolerance, so the shipped E does not
+        // rise; it is two blocks of work and it is worth about a hundredth of a decibel.
         //
         // The "from" number on this line is therefore exactly the E of the last accepted pass, or the pre-loop E when
         // none was accepted - which is what the restore has to have produced - and the "to" number is the E the report
@@ -2939,6 +2942,17 @@ int main(int argc, char** argv)
         printf("               I/O and the host's own work. E pass %.3f ms (%.3f ms the first, cold), the init's\n",
                after.ms, before.ms);
         printf("               block (a) %.3f ms.\n", solve_ms);
+        {
+            // Which rung of the ridge ladder the run's block (a) calls ended on. On an ordinary image every call takes
+            // the shipped ridge, and the line then says in one place what the E column only implies: the decoder is
+            // the one the same source always produced. A reduced, none or refused is the near-singular arm, and a
+            // reader chasing an odd asset should see it without re-running under a debugger.
+            long long rung[4];
+            decoder_ridge_tally(rung);
+            printf("  block (a) ridge: %lld standard, %lld reduced, %lld none, %lld refused  (the rung of the ridge\n",
+                   rung[0], rung[1], rung[2], rung[3]);
+            printf("               ladder each call ended on; anything but all-standard is a near-singular matrix)\n");
+        }
         printf("  device       %.1f MB: the source chain, both latents at every level, and block (b)'s workspace,\n",
                (double)device_bytes / (1024.0 * 1024.0));
         printf("               which every plane owns its own of so that the planes can be solved at the same time\n");

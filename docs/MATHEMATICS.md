@@ -58,7 +58,7 @@ is measured on its own double quadratic; a rounding-level rise of the float-meas
 The sampled-PSNR the report prints is on the same K sites (it is what E fits, reported as fitted). The texel-centre PSNR
 and the per-level mip PSNR are what the independent decoder (`tools/dds_decode.py`) reproduces from the files alone.
 
-## 3. The three block solves, and why each is exact
+## 3. The three block solves, and what each guarantees
 
 **(a) The decoder, `W` and `b`.** Normal equations `A = sum omega v v^T`, `rhs_c = sum omega v t_c`, `v = [phi; 1]`, over
 EVERY site of EVERY plane with `omega = w_m`. One `A` shared by all outputs (`cw` scales each output's equation uniformly
@@ -74,12 +74,21 @@ run six times worse (8.800630e-06 against 1.268264e-06 at round 20) and still ri
 singular at the init, where level 0 is a constant plane, and the run collapses at 8.951838e-05 in one round. So the
 block measures its own step, for free: `A` and `rhs` ARE the quadratic `E` is in `(W, b)` up to the constant
 `sum omega cw t^2`, so `Q(x) = sum_c cw[c] (x_c^T A x_c - 2 x_c . rhs_c)` differenced between the incoming decoder and a
-candidate is the change in `E`'s weighted sum, and dividing by `sum(cw)` times the weighted site count is the change in
-the printed `E`. The shipped ridge is tried first -- a well-conditioned `A` therefore gives the decoder it always gave,
-byte for byte -- then `1e-12 mean(diag A)`, then zero; a candidate is taken unless it raises `E` by more than 1e-12
-(`Q`'s own rounding is 1e-16 there, and a re-solve of a converged system returns the same `Q` to the last bit and must
-still be taken, or the run changes basin for nothing), and if none is taken the previous decoder is kept and the block
-does not step. On the dot image the fallbacks are not merely a safety net: the run ends at 4.627044e-07 and 60.46 dB
+candidate is the change in `E`'s weighted sum -- up to the fp32 rounding of the features `A` and `rhs` were accumulated
+from, which `E` is measured in double from the same planes, about 1e-12 in the printed units at a decoder norm of 300 --
+and dividing by `sum(cw)` times the weighted site count is the change in the printed `E`. The shipped ridge is tried
+first -- a well-conditioned `A` therefore gives the decoder it always gave, byte for byte -- then `1e-12 mean(diag A)`,
+then zero; a candidate is taken unless it raises `E` by more than 1e-12 (`Q`'s own rounding is 1e-16 there, and a
+re-solve of a converged system returns the same `Q` to the last bit and must still be taken, or the run changes basin
+for nothing), and if none is taken the previous decoder is kept and the block does not step.
+
+**`Q`'s own rounding is computed, not assumed.** `Q` is a difference of two large nearly-cancelling sums, so its
+absolute rounding is about `eps mm sum_ij |x_i| |a_ij| |x_j| + 2 eps mm sum_i |x_i| |rhs_i|`, growing with `|x|^2`. The
+lower rungs are reached exactly when `A` is near-singular, which is when `|x|` is large, and at `|x|` of 1e6 to 1e8 the
+computed difference of two `Q`s is noise of random sign. So the block computes that bound beside each `Q`, for the
+incoming decoder and the candidate both, and takes the candidate only when `dQ + err_prev + err_cand <= 1e-12`: an
+inconclusive comparison is a refusal. A solve that comes back with an infinity or a NaN anywhere is refused before `Q`
+is evaluated at all. The report line `block (a) ridge:` counts how many calls of the run ended on each rung. On the dot image the fallbacks are not merely a safety net: the run ends at 4.627044e-07 and 60.46 dB
 where it ended at 1.268264e-06 and 53.69 dB. No tuning parameter: the ladder and the bar are fixed.
 
 **(b) Level 1 (and, under bc8, level 0), a sparse least squares.** Hold `s` and `W`. Each site's output is
@@ -104,7 +113,9 @@ state; only a strict decrease moves.
 same parity classes of texels (level 0). A bilinear site's two taps per axis are ADJACENT texels, so same-colour texels
 (two apart) share no site and each pass is an exact joint block step for any offset; the offsets being at most 3/8 (and
 the clamp only pulling inward) is what makes the 3x3 pixel enumeration of a texel's sites complete. `E` is
-non-increasing across every block of every round; the round loop asserts it (Debug) or warns (Release).
+non-increasing across every block of every round; the round loop warns, naming the round and the block, when one rises
+beyond the loose tolerance - a warning in both configurations and never an assert, because it is a floating-point
+judgement and an assert that can cry wolf on rounding is an assert nobody trusts.
 
 ## 4. Quantisation, and the one invariant that must never break
 

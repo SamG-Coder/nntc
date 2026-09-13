@@ -433,27 +433,14 @@ void reconstruct_levels(DeviceModel* d, const Model& m, std::vector<std::vector<
         decode_plane(d, m, (int)i, recon[i]);
 }
 
-// A run with a different layout may have left files of the SAME prefix behind - a deeper chain's _recon_M7.png, a
-// material's _t2_ PNGs, the single _lat0.dds of a two-file level 0 - and a stale file beside a fresh asset is read as
-// part of it. Every sibling name this writer could have produced but did not is therefore removed.
-static void remove_stale(const std::string& name)
-{
-    std::remove(name.c_str());
-}
+// THE ENCODER NEVER DELETES A FILE (the owner's rule). A run with a different layout may leave files of the same prefix
+// behind - a deeper chain's _recon_M7.png, the single _lat0.dds of a two-file level 0 - and they stay where they are:
+// the descriptor names the files that belong to the asset, and a reader that trusts the descriptor is never misled.
+// Deleting by name pattern under the user's prefix could take a file that was never ours.
 
 bool write_level_pngs(const Model& m, const std::vector<std::vector<uint8_t>>& recon,
                       const std::vector<Image>& source_chain, const std::string& prefix)
 {
-    for (int t = 0; t < MAX_TEXTURES; t++)
-        for (int level = 0; level <= MAX_MIP_LEVELS + 1; level++)
-            for (int one = 0; one < 2; one++)   // both naming forms: _M<l> for a single texture, _t<t>_M<l> for a material
-            {
-                const int textures = one ? 1 : 2;
-                if ((textures == 1) == (m.textures == 1) && t < m.textures && level < (int)m.planes.size())
-                    continue;   // this one is about to be written
-                remove_stale(level_png_name(prefix, "recon", textures, t, level));
-                remove_stale(level_png_name(prefix, "src", textures, t, level));
-            }
     for (size_t i = 0; i < m.planes.size(); i++)
     {
         const PlaneSize& p = m.planes[i];
@@ -777,15 +764,6 @@ bool write_asset(const Model& m, const std::string& prefix, const std::string& j
         js += "    }" + std::string(l == 0 ? "," : "") + "\n";
     }
 
-    // The level-0 names this writer could have produced and did not: a run whose layout changed would otherwise leave
-    // the other shape's .dds beside the .json, and a reader pointed at the prefix rather than at the JSON would find it.
-    if (bc0 && m.c0 >= 3)
-        remove_stale(prefix + "_lat0.dds");
-    else
-    {
-        remove_stale(prefix + "_lat0a.dds");
-        remove_stale(prefix + "_lat0b.dds");
-    }
 
     js += "  ],\n  \"decoder\": {\n";
     js += "    \"type\": \"bilinear\",\n";

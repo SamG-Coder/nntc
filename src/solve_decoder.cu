@@ -24,7 +24,9 @@
 // level 0's second channel starts at zero everywhere - from making A singular. What is solved is therefore the RIDGED
 // problem, whose minimiser is the true one only while the ridge is negligible against it; where it is not, the block
 // falls back on smaller ridges and finally on the decoder it came in with, and the objective's own quadratic - which A
-// and rhs already are - says which. See the ladder at the foot of this file; E cannot rise across the block.
+// and rhs already are - says which. See the ladder at the foot of this file: E does not rise across block (a) beyond
+// the tolerance, and the shipped ridge is tried first, so a well-conditioned system gets the decoder it always got,
+// bit for bit.
 //
 // The accumulation is a two-stage reduction on a FIXED grid, not a set of atomic adds. Floating-point addition is not
 // associative, so an atomic accumulator returns whatever the blocks' scheduling made of it, and two identical runs can
@@ -35,6 +37,7 @@
 // is reproducible bit for bit.
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <vector>
 
@@ -194,6 +197,9 @@ static bool gauss_jordan(std::vector<double>& g, int m, int nrhs)
                 pivot = i;
             }
         }
+        // An exact zero is the only pivot this refuses. A tolerance here would be a second, hidden conditioning
+        // policy beside the ridge ladder, and the caller does not need one: a solve that squeaks past a tiny pivot
+        // comes back as a huge or non-finite x, and the acceptance test above the ladder refuses it on its own terms.
         if (best == 0.0)
             return false;
         if (pivot != k)
@@ -214,6 +220,47 @@ static bool gauss_jordan(std::vector<double>& g, int m, int nrhs)
         }
     }
     return true;
+}
+
+// THE RIDGE IS NOT FREE, AND ON SOME IMAGES IT IS WHAT DECIDES THE STEP.
+//
+// The solve returns the minimiser of Q(x) + ridge ||x||^2, not of Q. When A is well conditioned the ridge term is
+// a billionth of the diagonal against a solution of order one and the two minimisers agree to far below any
+// tolerance. When A is nearly singular they do not: a 100x36 black image with one white pixel drives level 1's
+// channels to within 0.16 of constant, the exact minimiser's norm grows past 100, and the ridge's own penalty then
+// moves the solution far enough that Q - and therefore E - RISES across the block. Measured on that image at the
+// default layout: E 1.875599e-06 after round 8's block (c'), 2.112583e-06 after round 9's block (a), a 13 % rise,
+// repeated every round from there; raising the ridge to 1e-6 makes the whole run six times worse (E 8.80e-06
+// against 1.27e-06 at round 20) and still rises, and dropping it to zero makes A singular at the init, where
+// level 0 is a constant plane, and the run collapses at 8.95e-05.
+//
+// So the ridge stays, and the block reports what it actually guarantees instead: the SHIPPED ridge is tried first,
+// so every run whose A is well conditioned gets exactly the decoder it got before, byte for byte; if that
+// candidate raises Q by more than Q's own rounding it is the ridge and not the data that is speaking, and smaller
+// ridges are tried in turn; and if none of them clears that bar the previous decoder is kept and the block takes
+// no step at all. E does not rise across block (a) beyond the tolerance, by construction rather than by argument.
+static const double RIDGE_LADDER[] = { 1e-9, 1e-12, 0.0 };
+
+// A candidate is refused only when it raises E by more than this, in E's own [0,1] units. It is NOT a tolerance on
+// a real rise: the ridge's own effect on the dot image above is 2.4e-07, five orders of magnitude above it, and the
+// smallest E a real image reaches is 1e-05. It is there because Q is a sum of some hundreds of double products of
+// order one, so its own rounding is a few times 1e-16 in these units, and because a call that re-solves an already
+// converged system returns the same decoder and the same Q to the last bit - a step of exactly zero, which is not a
+// rise and must go on being taken, or the run lands in a different basin for no reason. The bound the quadratic
+// carries beside itself is charged against the difference before it is compared with this, so the test is on the
+// rise the arithmetic can actually resolve.
+static const double LS_ACCEPT_RISE = 1e-12;
+
+// Which rung of the ridge ladder each call of this run ended on, so the report can say it and a gate can read it. A
+// run whose images are ordinary must be all-standard: a single reduced, none or refused is the near-singular arm
+// speaking, and that is worth seeing in the report of the run it happened in rather than inferred from the E column.
+static const size_t RIDGE_REFUSED = sizeof(RIDGE_LADDER) / sizeof(RIDGE_LADDER[0]);
+static long long g_ridge_tally[RIDGE_REFUSED + 1] = { 0 };
+
+void decoder_ridge_tally(long long out[4])
+{
+    for (size_t i = 0; i <= RIDGE_REFUSED; i++)
+        out[i] = g_ridge_tally[i];
 }
 
 // Returns the kernel time in milliseconds, measured with CUDA events around the accumulation of every plane.
@@ -271,76 +318,66 @@ double solve_decoder(DeviceModel* d, Model& m, int k, const std::vector<double>&
             x_prev[(size_t)c * mm + nin] = (double)m.dec.b[c];
         }
 
-    // E's own numerator as a function of the decoder, up to the constant sum omega cw t^2 that does not depend on it:
-    //
-    //     Q(x) = sum_c cw[c] ( x_c^T A x_c - 2 x_c . rhs_c )
-    //
-    // A and rhs are exactly the sums E is a quadratic in, so Q(x_new) - Q(x_old) IS the change in E's weighted sum over
-    // every site of every plane, and dividing it by sum(cw) times the weighted site count gives the change in the E the
-    // round loop prints. It therefore costs no objective pass to know whether a candidate decoder lowers E: a few
-    // thousand double multiply-adds on the host, in a fixed order, on numbers that are already here.
-    auto qform = [&](const std::vector<double>& x) {
-        double q = 0.0;
-        for (int c = 0; c < nout; c++)
-        {
-            double qc = 0.0;
-            for (int i = 0; i < mm; i++)
-            {
-                for (int j = 0; j < mm; j++)
-                {
-                    const double a = i <= j ? acc[(size_t)tri_index(i, j, mm)] : acc[(size_t)tri_index(j, i, mm)];
-                    qc += x[(size_t)c * mm + i] * a * x[(size_t)c * mm + j];
-                }
-                qc -= 2.0 * x[(size_t)c * mm + i] * acc[(size_t)tri + (size_t)c * mm + i];
-            }
-            q += (double)m.cw[c] * qc;
-        }
-        return q;
-    };
-
-    // THE RIDGE IS NOT FREE, AND ON SOME IMAGES IT IS WHAT DECIDES THE STEP.
-    //
-    // The solve returns the minimiser of Q(x) + ridge ||x||^2, not of Q. When A is well conditioned the ridge term is
-    // a billionth of the diagonal against a solution of order one and the two minimisers agree to far below any
-    // tolerance. When A is nearly singular they do not: a 100x36 black image with one white pixel drives level 1's
-    // channels to within 0.16 of constant, the exact minimiser's norm grows past 100, and the ridge's own penalty then
-    // moves the solution far enough that Q - and therefore E - RISES across the block. Measured on that image at the
-    // default layout: E 1.875599e-06 after round 8's block (c'), 2.112583e-06 after round 9's block (a), a 13 % rise,
-    // repeated every round from there; raising the ridge to 1e-6 makes the whole run six times worse (E 8.80e-06
-    // against 1.27e-06 at round 20) and still rises, and dropping it to zero makes A singular at the init, where
-    // level 0 is a constant plane, and the run collapses at 8.95e-05.
-    //
-    // So the ridge stays, and the block reports what it actually guarantees instead: the SHIPPED ridge is tried first,
-    // so every run whose A is well conditioned gets exactly the decoder it got before, byte for byte; if that
-    // candidate raises Q by more than Q's own rounding it is the ridge and not the data that is speaking, and smaller
-    // ridges are tried in turn; and if none of them clears that bar the previous decoder is kept and the block takes
-    // no step at all. E cannot rise across block (a) by construction rather than by argument.
-    static const double RIDGE_LADDER[] = { 1e-9, 1e-12, 0.0 };
-
     // Q is an unnormalised sum; the round loop's E is that sum over sum(cw) times the weighted site count. Dividing by
-    // the same number here puts the test in the loop's own units, so what this block refuses is exactly what the loop
-    // would print as a rise.
+    // the same number puts the test below in the loop's own units, so what this block refuses is exactly what the loop
+    // would print as a rise. A zero normaliser would make every difference read as zero and every candidate look free,
+    // so it refuses instead: the weight validation in main.cpp already forbids it, and a guard that fails open is the
+    // wrong default for the one test standing between a degenerate solve and the shipped decoder.
     double sum_cw = 0.0;
     for (int c = 0; c < nout; c++)
         sum_cw += (double)m.cw[c];
     double den = 0.0;
     for (size_t i = 0; i < planes; i++)
         den += per_site[i] * (double)d->planes[i].w0 * (double)d->planes[i].h0 * (double)(1 + k);
-    const double inv_norm = sum_cw * den > 0.0 ? 1.0 / (sum_cw * den) : 0.0;
+    const bool norm_ok = sum_cw * den > 0.0;
+    const double inv_norm = norm_ok ? 1.0 / (sum_cw * den) : 0.0;
 
-    // A candidate is refused only when it raises E by more than this, in E's own [0,1] units. It is NOT a tolerance on
-    // a real rise: the ridge's own effect on the dot image above is 2.4e-07, five orders of magnitude above it, and the
-    // smallest E a real image reaches is 1e-05. It is there because Q is a sum of some hundreds of double products of
-    // order one, so its own rounding is a few times 1e-16 in these units, and because a call that re-solves an already
-    // converged system returns the same decoder and the same Q to the last bit - a step of exactly zero, which is not a
-    // rise and must go on being taken, or the run lands in a different basin for no reason.
-    static const double LS_ACCEPT_RISE = 1e-12;
+    // E's own numerator as a function of the decoder, up to the constant sum omega cw t^2 that does not depend on it:
+    //
+    //     Q(x) = sum_c cw[c] ( x_c^T A x_c - 2 x_c . rhs_c )
+    //
+    // A and rhs are exactly the sums E is a quadratic in, so Q(x_new) - Q(x_old) is the change in E's weighted sum over
+    // every site of every plane up to the fp32 rounding of the features A and rhs were accumulated from - about 1e-12
+    // in the loop's units at a decoder norm of 300 - and dividing it by sum(cw) times the weighted site count gives the
+    // change in the E the round loop prints. It therefore costs no objective pass to know whether a candidate decoder
+    // lowers E: a few thousand double multiply-adds on the host, in a fixed order, on numbers that are already here.
+    //
+    // WHAT IS RETURNED BESIDE Q IS ITS OWN ROUNDING BOUND, AND THE TEST IS USELESS WITHOUT IT. Q is a difference of
+    // two large sums that nearly cancel, so its absolute rounding is about eps * mm times the sum of the magnitudes
+    // of its terms, which grows with |x|^2. That matters precisely on the rungs below the shipped ridge: they are
+    // reached when A is near-singular, which is when the solutions are large, and at |x| of 1e6 to 1e8 the computed
+    // difference of two Q's is rounding noise whose sign says nothing. Bounding it makes an inconclusive comparison
+    // read as inconclusive, and an inconclusive candidate is refused.
+    auto qform = [&](const std::vector<double>& x, double& err) {
+        double q = 0.0, e = 0.0;
+        for (int c = 0; c < nout; c++)
+        {
+            double qc = 0.0, ec = 0.0;
+            for (int i = 0; i < mm; i++)
+            {
+                for (int j = 0; j < mm; j++)
+                {
+                    const double a = i <= j ? acc[(size_t)tri_index(i, j, mm)] : acc[(size_t)tri_index(j, i, mm)];
+                    qc += x[(size_t)c * mm + i] * a * x[(size_t)c * mm + j];
+                    ec += std::fabs(x[(size_t)c * mm + i]) * std::fabs(a) * std::fabs(x[(size_t)c * mm + j]);
+                }
+                qc -= 2.0 * x[(size_t)c * mm + i] * acc[(size_t)tri + (size_t)c * mm + i];
+                ec += 2.0 * std::fabs(x[(size_t)c * mm + i]) * std::fabs(acc[(size_t)tri + (size_t)c * mm + i]);
+            }
+            q += (double)m.cw[c] * qc;
+            e += (double)m.cw[c] * ec;
+        }
+        err = DBL_EPSILON * (double)mm * e * inv_norm;   // in the loop's units, like the difference it bounds
+        return q;
+    };
 
-    const double q_prev = had_previous ? qform(x_prev) : 0.0;
+    double err_prev = 0.0;
+    const double q_prev = had_previous ? qform(x_prev, err_prev) : 0.0;
     const int cols = mm + nout;
     std::vector<double> g((size_t)mm * cols, 0.0);
     std::vector<double> x_new((size_t)nout * mm, 0.0);
-    bool accepted = false, solved_any = false;
+    bool accepted = false;
+    size_t taken = 0;
 
     for (size_t step = 0; step < sizeof(RIDGE_LADDER) / sizeof(RIDGE_LADDER[0]) && !accepted; step++)
     {
@@ -362,16 +399,35 @@ double solve_decoder(DeviceModel* d, Model& m, int k, const std::vector<double>&
         }
         if (!gauss_jordan(g, mm, nout))
             continue;
-        solved_any = true;
 
         // Rounded to the float the asset carries BEFORE it is judged: the decoder that ships is the one whose Q the
         // objective will measure, and on an ill-conditioned system the two need not agree in the last places.
+        bool finite = true;
         for (int c = 0; c < nout; c++)
             for (int i = 0; i < mm; i++)
-                x_new[(size_t)c * mm + i] = (double)(float)g[(size_t)i * cols + mm + c];
-        if (!had_previous || (qform(x_new) - q_prev) * inv_norm <= LS_ACCEPT_RISE)
+            {
+                const double v = (double)(float)g[(size_t)i * cols + mm + c];
+                x_new[(size_t)c * mm + i] = v;
+                finite = finite && std::isfinite(v);
+            }
+        // An infinity or a NaN anywhere in the solution is refused before Q is evaluated at all: Q of a non-finite x
+        // is not a number the test can read, and the float cast above turns a merely enormous solve into an infinity
+        // in any case. The rung below may still return something usable.
+        if (!finite)
+            continue;
+        double err_cand = 0.0;
+        const double q_cand = qform(x_new, err_cand);
+        // The comparison and its own uncertainty: a candidate is taken only when the rise is under the tolerance even
+        // after both Q's rounding bounds are charged against it, so a difference that is noise is a refusal.
+        if (!had_previous ||
+            (norm_ok && (q_cand - q_prev) * inv_norm + err_prev + err_cand <= LS_ACCEPT_RISE))
+        {
             accepted = true;
+            taken = step;
+        }
     }
+
+    g_ridge_tally[accepted ? taken : RIDGE_REFUSED]++;
 
     if (accepted)
     {
@@ -384,9 +440,9 @@ double solve_decoder(DeviceModel* d, Model& m, int k, const std::vector<double>&
             m.dec.b[c] = (float)x_new[(size_t)c * mm + nin];
         }
     }
-    else if (!solved_any && !had_previous)
+    else if (!had_previous)
     {
-        // A singular system with nothing to fall back on means the features carry no information at all; the best
+        // Every rung refused with nothing to fall back on: the features carry no usable information at all; the best
         // constant fit is the weighted mean target, which is the last row of the right-hand side divided by the
         // weighted site count in A's last entry.
         m.dec.w.assign((size_t)nout * nin, 0.0f);

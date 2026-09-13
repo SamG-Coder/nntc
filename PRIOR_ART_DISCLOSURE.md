@@ -188,11 +188,15 @@ The site's position is carried as a pixel of the plane being fitted scaled into 
 (`x = (p + 0.5 + d) * W / W_m - 0.5`), not through a normalised `u`, because the round trip through `u` rounds twice in
 fp32. The double-precision checker goes through `u` on purpose so it is checking the position and not the spelling.
 
-### 5.2 Three exact block solves, alternated
+### 5.2 Three block solves, alternated
 
 The unknowns are the decoder `(W, b)`, level 1's plane and level 0's plane. Holding any two makes `E` an exact
-quadratic in the third, so each block is an **exact minimiser** and `E` cannot increase across any of them; the loop is
-monotone by construction (an assert in Debug, a warning naming the round and the block in Release). The BC refinement's acceptance is decided on a double quadratic while `E` is measured in float, so the release gate compares `E` with a `1e-9` relative tolerance. The only steps
+quadratic in the third. Blocks (b) and (c) take that quadratic's **exact minimiser**; block (a) solves a ridged form of
+it and takes the step only when its own quadratic says `E` does not rise beyond a fixed tolerance, trying the shipped
+ridge first so a well-conditioned system gets the decoder it always got, bit for bit. `E` therefore does not increase
+across any block beyond that tolerance and the loop is monotone by construction, with a warning naming the round and
+the block when one rises beyond the loose comparison - a warning in both configurations, never an assert, because it is
+a floating-point judgement. The BC refinement's acceptance is decided on a double quadratic while `E` is measured in float, so the release gate compares `E` with a `1e-9` relative tolerance. The only steps
 that may raise `E` are the grid freezes, which apply a constraint.
 
 **(a) The decoder: global linear least squares.** With `v = [phi ; 1]`, every site of every plane accumulates

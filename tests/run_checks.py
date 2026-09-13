@@ -79,7 +79,9 @@ def executable(build_dir, name):
 
 def run(cmd):
     print('$ ' + ' '.join(cmd))
-    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    # The executables print UTF-8 (their manifest makes the active code page UTF-8), so their output is decoded as
+    # UTF-8 whatever the console's own code page is; a byte that is not UTF-8 is replaced, never fatal.
+    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, encoding='utf-8', errors='replace')
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
     return proc
@@ -114,8 +116,10 @@ ROUND = re.compile(r'^round\s+(\d+)\s+E ([0-9.e+-]+) ([0-9.e+-]+) ([0-9.e+-]+)\s
 
 
 def loop_checks(text, tol):
-    """The round loop's gates. Every block of every round is the exact minimiser of E in its own variables, so the
-    three numbers each round prints must never rise, across rounds as well as inside one. The single exception is block
+    """The round loop's gates. Every block of every round minimises E in its own variables - blocks (b) and (c)
+    exactly, block (a) subject to its ridge and its own acceptance test, so that E does not rise across it beyond the
+    tolerance - so the three numbers each round prints must never rise, across rounds as well as inside one (the
+    comparison below carries the loose tolerance that covers block (a)'s). The single exception is block
     (b) of the round that freezes level 1's grid: snapping the plane onto the grid applies a constraint rather than
     taking a step, and a constraint can only cost E. Every later block (b) is the quantised sweeps, which minimise the
     same objective over that grid and so may not raise E either - that is the gate on the quantised phase. The loop must
@@ -254,6 +258,20 @@ def timing(text, what):
         return
     print('  timing: %s: %s s total, (a) %s / (b) %s / (c) %s / E %s ms over %s passes'
           % (what, hit.group(1), hit.group(2), hit.group(3), hit.group(4), hit.group(5), hit.group(6)))
+
+
+RIDGE = re.compile(r'block \(a\) ridge: (\d+) standard, (\d+) reduced, (\d+) none, (\d+) refused')
+
+
+def ridge_tally(text, what):
+    """The report's block (a) ridge line, as the four counts. It says which rung of the ridge ladder each of the run's
+    decoder solves ended on, and it is the only place the output says it. An ordinary image must be all-standard: the
+    lower rungs are reached only when the normal matrix is near-singular, and a run that quietly starts taking them is
+    a run whose decoder is no longer the one the same source always produced."""
+    hit = RIDGE.search(text)
+    if not hit:
+        raise SystemExit('FAIL: %s printed no "block (a) ridge:" line' % what)
+    return [int(g) for g in hit.groups()]
 
 
 def number(text, pattern, what):
@@ -977,11 +995,20 @@ def ill_conditioned_checks(encode):
                 raise SystemExit('FAIL: the %dx%d dot raised E across a block, which every block forbids: %s'
                                  % (width, height, [l for l in proc.stdout.splitlines() if 'raised E' in l]))
             rounds = loop_checks(proc.stdout, 1e-4)
-            print('  the %dx%d dot: %d rounds, no block raised E (%.6e -> %.6e)'
-                  % (width, height, len(rounds), rounds[0][1], rounds[-1][3]))
+            # The ladder's own arm, on the one image that reaches it: the line has to be there and to add up, and the
+            # run has to stay free of an E rise whichever rungs it took. Which rungs those are is NOT asserted - it is
+            # a property of a near-singular matrix and not of the encoder - but it is printed, because a change in the
+            # mix is the first thing to look at if this gate ever starts failing.
+            tally = ridge_tally(proc.stdout, 'the %dx%d dot' % (width, height))
+            if sum(tally) <= 0:
+                raise SystemExit('FAIL: the %dx%d dot counted no block (a) calls' % (width, height))
+            print('  the %dx%d dot: %d rounds, no block raised E (%.6e -> %.6e), block (a) ridge %d/%d/%d/%d'
+                  % (width, height, len(rounds), rounds[0][1], rounds[-1][3],
+                     tally[0], tally[1], tally[2], tally[3]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    record('a near-singular block (a)', 'one white pixel on black at three extents: E monotone, no ridge-driven rise')
+    record('a near-singular block (a)',
+           'one white pixel on black at three extents: E monotone, no ridge-driven rise, the ridge tally reported')
 
 
 def init0_checks(encode):
@@ -989,9 +1016,9 @@ def init0_checks(encode):
 
     UNDER --l0 bc8 (the default) the residual seed is a sequence of minimisations with one free step between them: the
     channel is written into a plane whose column is ZERO, which block (a) can only have seen as zero, so writing it
-    cannot move E, and the refit that follows is the exact minimiser in (W, b) and cannot raise it. The whole seed is
-    therefore monotone in E, channel by channel, and the report prints both ends of every step - which is what is
-    checked here, alongside the loop's own monotonicity afterwards and a round trip of the asset either init produced.
+    cannot move E, and the refit that follows is block (a), which does not raise it beyond its tolerance. The whole
+    seed is therefore monotone in E, channel by channel, and the report prints both ends of every step - which is what
+    is checked here, alongside the loop's own monotonicity afterwards and a round trip of the asset either init made.
 
     UNDER --l0 palette IT IS NOT, and the gate says so rather than asserting the stronger thing on both. levels is
     2^bits - 1 and therefore odd at every depth the palette mode allows, so no index stands for the value 0: an
@@ -2281,6 +2308,17 @@ def review_fix_checks(encode, build_dir):
                 raise SystemExit('FAIL: a material naming a non-ASCII file must encode it (%d): %s'
                                  % (proc.returncode, proc.stderr.strip()))
             print('  the review: a material naming a non-ASCII file encodes it')
+            # AND ON THE COMMAND LINE. argv arrives through the narrow entry point, which reads the process's active
+            # code page; the embedded manifest declares it UTF-8, so the accented name survives from the shell to fopen
+            # and back out in the wrote line. The gate passes the argument as a Python str, which subprocess hands to
+            # CreateProcessW; the C runtime then narrows it to the active code page, UTF-8 under the manifest.
+            proc = run([encode, accent, '-o', os.path.join('out', 'review_unicode_cli'), '--png', '0', '--quiet'])
+            if proc.returncode != 0:
+                raise SystemExit('FAIL: a non-ASCII file named on the command line must encode (%d): %s'
+                                 % (proc.returncode, proc.stderr.strip()))
+            if u'caf\u00e9' not in proc.stdout:
+                raise SystemExit('FAIL: the wrote line must carry the accented name as UTF-8, not %r' % proc.stdout[-200:])
+            print('  the review: a non-ASCII file named on the command line encodes, and its name prints as UTF-8')
         else:
             print('  the review: the non-ASCII file name is a Windows case and is skipped')
 
@@ -2893,6 +2931,28 @@ def argument_and_status_checks(encode):
                                    'descriptor; every refusal returns 1')
 
 
+def never_delete_check(encode):
+    """The encoder never deletes a file (the owner's rule): a stale sibling under the prefix - a leftover deeper level's
+    PNG, the other layout's .dds - stays where it is, and the descriptor is the authority on which files are the
+    asset's. Both kinds are planted before a run and must survive it byte for byte."""
+    odir, prefix = out_asset('tiny_never_delete')
+    os.makedirs(odir, exist_ok=True)
+    planted = {prefix + '_recon_M9.png': b'not a png, and not ours to remove',
+               prefix + '_lat0a.dds': b'a stale two-file level 0 beside a one-file run',
+               prefix + '_src_t3_M2.png': b'a stale material level'}
+    for name, body in planted.items():
+        open(name, 'wb').write(body)
+    proc = run([encode, os.path.join('tests', 'tiny.png'), '-o', odir, '--quiet'])
+    if proc.returncode != 0:
+        raise SystemExit('FAIL: the never-delete run returned %d' % proc.returncode)
+    for name, body in planted.items():
+        if not os.path.exists(name) or open(name, 'rb').read() != body:
+            raise SystemExit('FAIL: the encoder removed or rewrote a stale sibling it did not write: %s' % name)
+    record('never deleting', 'stale siblings under the prefix (a deeper level PNG, the .dds of the other layout, a material '
+           'level) survive a run untouched')
+    print('  never deleting: three planted stale siblings survived the run byte for byte')
+
+
 def main():
     build_dir = os.path.join(ROOT, 'build')
     if '--build-dir' in sys.argv:
@@ -2908,6 +2968,13 @@ def main():
     rounds = loop_checks(proc.stdout, 1e-4)
     record('the round loop', 'E monotone across %d blocks of %d rounds' % (3 * len(rounds), len(rounds)))
     timing(proc.stdout, 'tiny.png, the default layout')
+
+    tally = ridge_tally(proc.stdout, 'tiny.png')
+    if tally[0] <= 0 or tally[1] or tally[2] or tally[3]:
+        raise SystemExit('FAIL: tiny.png took a block (a) rung below the shipped ridge: %s' % (tally,))
+    print('  block (a) ridge: %d standard, none reduced, none unridged, none refused' % tally[0])
+    record('block (a)\'s ridge ladder', 'tiny.png takes the shipped ridge on every one of its %d decoder solves'
+           % tally[0])
 
     quantisation_checks(proc.stdout, 'the default --q1-start')
     level_checks(proc.stdout, prefix)
@@ -2957,6 +3024,7 @@ def main():
     six_texture_checks(encode, build_dir)
     bare_command_check(encode)
     old_format_check(encode, build_dir)
+    never_delete_check(encode)
     argument_and_status_checks(encode)
     record('the bare command line', 'writes the three files beside the input, with the default layout')
 
