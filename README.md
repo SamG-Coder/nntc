@@ -1,13 +1,13 @@
 # NNTC: Not Neural Texture Compression
 
 `nntc_encode` compresses a texture, or a material of up to six textures, into **two latent planes and a few dozen
-matrix coefficients**: two `.dds` textures, or three when the full-resolution plane has three or four channels. A pixel shader gets
+matrix coefficients**: two `.dds` textures, or three when the full-resolution plane has three or four channels. A pixel shader decodes
 the whole material back from **two ordinary `Sample()` calls** -- three when the full-resolution plane has three or
 four channels -- and one matrix multiply of a few dozen to a few hundred multiply-accumulates per pixel for the whole
-material (the count is in [How it works](#how-it-works-briefly), below). No runtime library, no decompression at load: the files are plain `.dds`
-(BC4 / BC5 and 8-bit) and a `.json`.
+material (the count is in [How it works](#how-it-works-briefly), below). No runtime library, no decompression at load: the files are standard `.dds`
+(BC4 / BC5 and 8-bit) and a `.json` containing the fitted decoder coefficients.
 
-`nntc_view` shows the result on a real Direct3D 11 sampler, so what you see is what a game would see.
+`nntc_view` shows the result on a real Direct3D 11 sampler, so what you see is what an application would see.
 
 ## What it does
 
