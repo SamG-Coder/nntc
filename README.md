@@ -9,7 +9,7 @@ material (the count is in [How it works](#how-it-works-briefly), below). No runt
 
 The `nntc_view` is a small Windows D3D11 viewer that loads the .json and .dds files and displays the sampled and decoded results on a quad or a cubemap.
 
-Importantly, this method is compatible with normal GPU texture hardware bilinear, trilinear, and anisotropic filtering. The end result: large runtime memory savings due to packing 2-6 correlated material textures into a single set of latent textures, which are sampled normally and then decoded by a small pixel shader function.
+Importantly, this method is compatible with normal GPU texture hardware bilinear, trilinear, and anisotropic filtering. The encoder ensures the encoded latents and the fitted coefficients are compatible with hardware filtering. The end result: large runtime memory savings due to packing 2-6 correlated material textures into a single set of latent textures, which are sampled normally and then decoded by a small pixel shader function.
 
 ## What it does
 
