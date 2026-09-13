@@ -7,7 +7,7 @@ four channels, and one matrix multiply of a few dozen to a few hundred multiply-
 material (the count is in [How it works](#how-it-works-briefly), below). No runtime library, no decompression at load, no neural inference: the files are standard `.dds`
 (BC4 / BC5 and 8-bit) and a `.json` containing the fitted bilinear model's decoder coefficients. It uses a bilinear/degree-2 polynomial decoder (i.e. a degree-2 polynomial whose only quadratic terms are the products between the two latents).
 
-The `nntc_view` is a Windows D3D11 viewer that loads the .json and .dds files and displays the sampled and decoded results on a quad or a cubemap.
+The `nntc_view` is a Windows D3D11 viewer that loads the .json and .dds files and displays the sampled and decoded results on a textured quad or a cube, with keyboard camera controls.
 
 Importantly, this method is compatible with normal GPU texture hardware bilinear, trilinear, and anisotropic filtering. The encoder ensures the encoded latents and the fitted coefficients are compatible with hardware filtering. The end result: large runtime memory savings due to packing 2-6 correlated material textures into a single set of latent textures, which are sampled normally and then decoded by a small pixel shader function.
 
