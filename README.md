@@ -38,8 +38,7 @@ A Prior Art Disclosure, dated September 13, 2026 is [here](https://github.com/ri
   2048x1024 textures at `--c0 4 --c1 4` (`out/timing/log_md1234_c4c4.txt`). Larger inputs take longer: four 4096x4096
   textures run on the order of a minute (seen during development). The encoder tool currently only supports CUDA; without
   an NVIDIA GPU it does not encode, however the assets it writes decodes on any GPU (using plain pixel shaders).
-* **Encode Quality**: fitted for the hardware filter, not texel by texel, so bilinear, trilinear and anisotropic sampling all
-  reconstruct correctly. `docs/RESULTS.md` has the measurements.
+* **Encode Quality**: The encoder fits the output for the hardware filter, not for texel by texel decoding, so the method is compatible with standard bilinear, trilinear and anisotropic sampling. `docs/RESULTS.md` has the measurements.
 
 ## Building
 
