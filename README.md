@@ -5,7 +5,7 @@ fitted matrix coefficients**. It outputs two `.dds` textures, or three when the 
 the whole material back from **two ordinary `Sample()` calls**, or three when the full-resolution plane has three or
 four channels, and one matrix multiply of a few dozen to a few hundred multiply-accumulates per pixel for the whole
 material (the count is in [How it works](#how-it-works-briefly), below). No runtime library, no decompression at load, no neural inference: the files are standard `.dds`
-(BC4 / BC5 and 8-bit) and a `.json` containing the fitted bilinear model's decoder coefficients.
+(BC4 / BC5 and 8-bit) and a `.json` containing the fitted bilinear model's decoder coefficients. It uses a bilinear/degree-2 polynomial decoder.
 
 The `nntc_view` is a Windows D3D11 viewer that loads the .json and .dds files and displays the sampled and decoded results on a quad or a cubemap.
 
