@@ -90,6 +90,8 @@ nntc_encode a.png b.png --weights 2,1           -> the first texture matters twi
 nntc_encode a.png --c0 1 --c1 2                 -> a smaller layout: 4 + 1 = 5 bits per pixel at the base
 nntc_encode rock_material.json -o out/          -> the same, with the inputs and their settings named in a file
 nntc_encode a.png -o out/name.json              -> the descriptor is exactly out/name.json, the .dds out/name_lat0.dds
+nntc_encode me1.png me2.png me3.png m4.png --l0 3        -> use 3 channels on latent 0 (harder material)
+nntc_encode me1.png me2.png me3.png m4.png m5.png --l0 4 -> use 4 channels on latent 0 (even harder material)
 ```
 
 The tree also carries two small source-material examples under `examples/`, with their source PNGs and precompressed
