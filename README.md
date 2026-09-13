@@ -1,4 +1,4 @@
-# NNTC: Not Neural Texture Compression
+# NNTC: Non-Neural Texture Compression
 
 The `nntc_encode` tool (for Windows or Linux) compresses a 24-bpp texture, or a PBR material of up to six 24-bpp textures, into **two mipmapped latent planes and a few dozen
 fitted matrix coefficients**. It outputs two `.dds` textures, or three when the full-resolution latent plane has three or four channels. A pixel shader decodes
