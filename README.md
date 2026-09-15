@@ -308,7 +308,7 @@ filter. The luma-plus-chroma split of a texture into a full-resolution plane and
 block format with mipmaps, goes back to the author's [Experiments in Luma-Optimized and Mipmapped DXT1
 Compression](https://web.archive.org/web/20201024153426/https://sites.google.com/site/richgel99/luma_chroma_texture_compression) (2012).
 
-Also see: [Texture Compression using Wavelet Decomposition](https://onlinelibrary.wiley.com/doi/10.1111/j.1467-8659.2012.03203.x) by Pavlos Mavridis and Georgios Papaioannou (2013).
+Also see: [Texture Compression using Wavelet Decomposition](https://onlinelibrary.wiley.com/doi/10.1111/j.1467-8659.2012.03203.x) by Mavridis and Papaioannou (2013), and [A new approach to combine texture compression and filtering](https://www.researchgate.net/publication/289735007_A_new_approach_to_combine_texture_compression_and_filtering) (2012).
 
 `docs/DESIGN.md` is
 the method, `docs/MATHEMATICS.md` the notes for whoever changes it, `PRIOR_ART_DISCLOSURE.md` the public description.
