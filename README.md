@@ -97,6 +97,7 @@ nntc_encode rock_material.json -o out/                      -> the same, with th
 nntc_encode a.png -o out/name.json                          -> the descriptor is exactly out/name.json, the .dds out/name_lat0.dds
 nntc_encode me1.png me2.png me3.png me4.png --c0 3          -> 3 channels on latent 0, a BC5 and a BC4 (a harder material)
 nntc_encode me1.png me2.png me3.png me4.png me5.png --c0 4  -> 4 channels on latent 0, two BC5s (a harder material still)
+nntc_encode albedo.png --rounds 60                          -> Use more encoding rounds for higher quality (slower)
 ```
 
 The tree also carries two small source-material examples under `examples/`, with their source PNGs and precompressed
