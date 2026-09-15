@@ -308,7 +308,12 @@ filter. The luma-plus-chroma split of a texture into a full-resolution plane and
 block format with mipmaps, goes back to the author's [Experiments in Luma-Optimized and Mipmapped DXT1
 Compression](https://web.archive.org/web/20201024153426/https://sites.google.com/site/richgel99/luma_chroma_texture_compression) (2012).
 
-Also see: [Texture Compression using Wavelet Decomposition](https://onlinelibrary.wiley.com/doi/10.1111/j.1467-8659.2012.03203.x) by Mavridis and Papaioannou (2012), and [A new approach to combine texture compression and filtering](https://www.researchgate.net/publication/289735007_A_new_approach_to_combine_texture_compression_and_filtering) by Hollemeersch, Pieters, Lambert and Van de Walle (2012), and [Texture compression using low-frequency signal modulation](https://www.researchgate.net/publication/221249059_Texture_compression_using_low-frequency_signal_modulation) by Fenney (2003).
+Also see: 
+- [Texture Compression using Wavelet Decomposition](https://onlinelibrary.wiley.com/doi/10.1111/j.1467-8659.2012.03203.x) by Mavridis and Papaioannou (2012)
+- [A new approach to combine texture compression and filtering](https://www.researchgate.net/publication/289735007_A_new_approach_to_combine_texture_compression_and_filtering) by Hollemeersch, Pieters, Lambert and Van de Walle (2012)
+- [Texture compression using low-frequency signal modulation](https://www.researchgate.net/publication/221249059_Texture_compression_using_low-frequency_signal_modulation) by Fenney (2003)
+- [Real-Time Neural Materials using Block-Compressed Features](https://onlinelibrary.wiley.com/doi/10.1111/cgf.15013) by Weinreich et al. (2024)
+- [Hardware Accelerated Neural Block Texture Compression with Cooperative Vectors](https://arxiv.org/abs/2506.06040) by Belcour and Benyoub (2025)
 
 `docs/DESIGN.md` is
 the method, `docs/MATHEMATICS.md` the notes for whoever changes it, `PRIOR_ART_DISCLOSURE.md` the public description.
