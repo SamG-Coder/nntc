@@ -58,8 +58,8 @@ void DecodeNNTC(float4 z0, float4 z1, out float outv[18])
     if (sel.x & 2) { [unroll] for (int i = 0; i < 4; i++) if (i < C0) phi[k++] = z0[i]; }                       // [b]  s_i
     if (sel.x & 4) { [unroll] for (int i = 0; i < 4; i++) [unroll] for (int j = 0; j < 4; j++) if (i < C0 && j < C1) phi[k++] = z0[i] * z1[j]; }   // [sc] s_i c_j
     [unroll] for (int r = 0; r < 18; r++) {
-        float acc = bias[r / 4][r % 4];
-        if (r < nout) for (int c = 0; c < nin; c++) acc += W[r * 6 + c / 4][c % 4] * phi[c];
+        float acc = bias[r >> 2][r & 3];   // >> 2 and & 3 are / 4 and % 4 on these non-negative indices, without fxc's integer-division warning
+        if (r < nout) for (int c = 0; c < nin; c++) acc += W[r * 6 + (c >> 2)][c & 3] * phi[c];
         outv[r] = acc;   // the identity output; the caller clamps to [0, 1] as the encoder's 8-bit rounding does
     }
 }

@@ -14,6 +14,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -47,7 +48,7 @@ PNG_MAGIC = bytes([137, 80, 78, 71, 13, 10, 26, 10])
 E_NOISE = 1e-8
 E_REL = 1e-6
 
-SEARCHED_DIRS = ['src', 'tools', 'tests', 'docs', 'viewer']
+SEARCHED_DIRS = ['src', 'shared', 'tools', 'tests', 'docs', 'viewer', 'viewer_vk']
 SEARCHED_FILES = ['README.md', 'CMakeLists.txt', 'LICENSE', 'PRIOR_ART_DISCLOSURE.md']
 
 # What the run reports at the end: one row per gate, in the order they were reached.
@@ -402,6 +403,127 @@ def shot_stable(view, asset, out, extra, runs=5):
     print('  the viewer: %d --shot launches of %s are byte-identical (%d bytes)'
           % (runs, os.path.basename(asset), len(first)))
     return first
+
+
+def vulkan_viewer(build_dir):
+    """The Vulkan viewer's executable, or None when this tree did not build one.
+
+    It is None on a machine with no Vulkan SDK, where the CMake target is skipped and says so. It is NOT None off
+    Windows any more: the target builds on Linux and its --shot needs no window, no surface and no desktop, so every
+    arm that does not need a Direct3D frame to compare against runs there too (the GLFW window needs a desktop session,
+    and no arm of this gate opens one). Every case that drives it reports SKIPPED rather than failing
+    when it is missing or when the machine has no Vulkan device, which is what keeps the Direct3D coverage from
+    depending on a second api being installed.
+    """
+    for candidate in (os.path.join(build_dir, 'Release', 'nntc_view_vk.exe'),
+                      os.path.join(build_dir, 'nntc_view_vk.exe'),
+                      os.path.join(build_dir, 'nntc_view_vk')):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+# The plain-GLSL decode, named explicitly wherever an arm written for stages 1 to 3 draws. Since stage 4 the viewer
+# takes the cooperative-vector path BY DEFAULT on a device that offers it, and every assertion below - the pairs against
+# the Direct3D viewer, the byte-identical launches, the flag toggles, the BC pack - is about the baseline path, which is
+# the product. The cooperative-vector arms name --coopvec 1 for themselves. A device without the extension accepts
+# --coopvec 0 as well: it is always honoured, and only --coopvec 1 can be refused.
+#
+# A BUILD without the extension reads the same way as a DEVICE without it, which is the whole point of the
+# compile-time guard: viewer_vk/main.cpp prints the same 'cooperative vectors: not available - <reason>' line, with a
+# reason naming its Vulkan headers, and refuses --coopvec 1 with the same ERROR and the same exit 1. Every arm below
+# is keyed on those two shapes and not on the reason's words, so it needs nothing added for it; the one thing that is
+# added is the sentence the skip prints, because 'this machine has no such GPU' and 'this build cannot have used one'
+# are different facts about a run and a reader should not have to tell them apart from the reason string alone.
+VK_PLAIN = ['--coopvec', '0']
+# The column the Vulkan viewer draws its decode-path token at, and the same arithmetic its main.cpp does:
+# OVL_W - 12 * 8 * FONT_SCALE, twelve characters in from the right-hand end of the 2560-pixel strip.
+VK_COOP_COLUMN = 2560 - 12 * 8 * 2
+
+
+def vk_shot(view, asset, out, extra, size=(640, 480)):
+    """One headless --shot of the Vulkan viewer, the second arm of everything shot() drives.
+
+    It returns the frame, the stderr and the stdout -- the viewer says some of what it has to say about a command line
+    on each -- or None when the machine reports no Vulkan device, in which case the case that asked for it says
+    skipped. The size is given explicitly and is small: this viewer creates no window, so it renders at whatever size
+    it is asked for, and none of the checks that go through here compare against a Direct3D frame (the ones that do ask
+    for the Direct3D frame's own size instead).
+    """
+    proc = run([view, asset, '--nooverlay', '--shot', out, '--size', str(size[0]), str(size[1])]
+               + VK_PLAIN + extra)
+    if proc.returncode != 0 and 'no Vulkan device' in proc.stderr:
+        return None
+    if proc.returncode != 0:
+        raise SystemExit('FAIL: nntc_view_vk --shot returned %d on %s: %r' % (proc.returncode, asset,
+                                                                             proc.stderr[-300:]))
+    return open(os.path.join(ROOT, out), 'rb').read(), proc.stderr, proc.stdout
+
+
+def vk_shot_stable(view, asset, out, extra, runs=5, size=(640, 480)):
+    """The same headless --shot launched `runs` times: every frame must be the same bytes.
+
+    The claim is stronger here than for the Direct3D viewer and the reason is structural rather than a matter of care:
+    this --shot creates no window and no surface at all, so there is no keystroke for it to receive and no compositor
+    between it and the image it writes. Returns the frame, or None on a machine with no Vulkan device.
+    """
+    first = vk_shot(view, asset, out, extra, size)
+    if first is None:
+        return None
+    for i in range(1, runs):
+        again = vk_shot(view, asset, out, extra, size)
+        if again is None or again[0] != first[0]:
+            raise SystemExit('FAIL: two headless nntc_view_vk --shot launches of %s drew different frames (run %d of '
+                             '%d)' % (asset, i + 1, runs))
+    print('  the Vulkan viewer: %d --shot launches of %s are byte-identical (%d bytes)'
+          % (runs, os.path.basename(asset), len(first[0])))
+    return first[0]
+
+
+def vk_skip_note(reason):
+    """What a shared case's record() says when its Vulkan arm did not run.
+
+    A skipped arm must never read as a passed one, so the summary carries the skip and its reason rather than falling
+    silent about it -- and the cases whose Vulkan arm DID run say 'and both viewers' instead.
+    """
+    return ' (Vulkan arm skipped: %s)' % reason
+
+
+def vk_six_texture_arm(build_dir, desc):
+    """The Vulkan half of the six-texture case: six --tex frames that must be pairwise different, and a --tex past the
+    end that must warn in the same words and fall back to texture 0.
+
+    It is here rather than inside the case because it needs no Direct3D frame, so it runs on Linux as well, where the
+    Direct3D half is skipped. It returns the text the case's record() appends.
+    """
+    vk = vulkan_viewer(build_dir)
+    if not vk:
+        print('  the Vulkan viewer: skipped, nntc_view_vk was not built')
+        return vk_skip_note('nntc_view_vk was not built')
+    frames = {}
+    for t in range(6):
+        got = vk_shot(vk, desc, os.path.join('out', 'tiny_six_vk%d.bmp' % t), ['--tex', str(t)])
+        if got is None:
+            print('  the Vulkan viewer: skipped, no Vulkan device on this machine')
+            return vk_skip_note('this machine reports no Vulkan device')
+        if 'WARNING: --tex' in got[1]:
+            raise SystemExit('FAIL: --tex %d is inside a six-texture material and must not warn on the Vulkan '
+                             'viewer: %r' % (t, got[1].strip()))
+        frames[t] = got[0]
+    for a in range(6):
+        for b in range(a + 1, 6):
+            if frames[a] == frames[b]:
+                raise SystemExit('FAIL: the Vulkan viewer drew the same frame for --tex %d and --tex %d, so its '
+                                 'shader is not selecting the output triple' % (a, b))
+    past = vk_shot(vk, desc, os.path.join('out', 'tiny_six_vk6.bmp'), ['--tex', '6'])
+    if past is None or 'WARNING: --tex 6 is outside 0..5' not in past[1]:
+        raise SystemExit('FAIL: --tex 6 on a six-texture material must warn on the Vulkan viewer\'s stderr, not %r'
+                         % (past and past[1].strip()))
+    if past[0] != frames[0]:
+        raise SystemExit('FAIL: a --tex past the end must fall back to texture 0 on the Vulkan viewer too')
+    print('  the Vulkan viewer: the six --tex frames are pairwise different and --tex 6 warns and falls back to 0 '
+          '(%d bytes each)' % len(frames[0]))
+    return ' on both viewers'
 
 
 def two_file_layout(prefix, c0):
@@ -1292,9 +1414,14 @@ def six_texture_checks(encode, build_dir):
         print('  --quiet: nothing at all on a clean run')
 
         if os.name != 'nt':
-            print('  the viewer: skipped (Windows only)')
+            # No Direct3D viewer here, but the Vulkan one builds on Linux and its --shot needs no desktop, so the
+            # frame arm of this case still runs - against itself rather than against a second api.
+            print('  the viewer: skipped (the Direct3D viewer is Windows only)')
+            vk_note = vk_six_texture_arm(build_dir, prefix + '_nntc.json')
             record('six textures', 'nout 18 solves and round-trips; --quiet drops every progress line and '
-                                   'keeps the whole report')
+                                   'keeps the whole report' +
+                                   (', and the six --tex frames are pairwise different on the Vulkan viewer'
+                                    if vk_note == ' on both viewers' else vk_note))
             return
         view = executable(build_dir, 'nntc_view')
         frames = {}
@@ -1316,11 +1443,16 @@ def six_texture_checks(encode, build_dir):
             raise SystemExit('FAIL: a --tex past the end must fall back to texture 0 and draw its frame')
         print('  the viewer: the six --tex frames are pairwise different and --tex 6 warns and falls back to 0 '
               '(%d bytes each)' % len(frames[0]))
+
+        # The same on Vulkan, as a second arm of the same case: the shader that selects the output triple is a
+        # transliteration of the other one, so the six frames must be pairwise different there too and a --tex past
+        # the end must warn in the same words and fall back to texture 0.
+        vk_note = vk_six_texture_arm(build_dir, prefix + '_nntc.json')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     record('six textures', 'nout 18 agrees with the host brute force under both level-0 modes, is deterministic, '
-                           'renders one distinct frame per texture; nout 15 solves; --quiet drops every progress '
-                           'line and keeps the whole report')
+                           'renders one distinct frame per texture' + vk_note + '; nout 15 solves; --quiet drops '
+                           'every progress line and keeps the whole report')
 
 
 def mip_filter_checks(encode):
@@ -2459,13 +2591,32 @@ def review_fix_checks(encode, build_dir):
                     raise SystemExit('FAIL: nntc_view --help does not name %s' % flag)
             print('  the review: nntc_view --help exits 0 and names all fourteen flags')
         else:
-            print('  the review: the viewer usage is a Windows case and is skipped')
+            print('  the review: the Direct3D viewer usage is a Windows case and is skipped')
+        # And the Vulkan viewer's usage. WHAT IS PINNED, exactly: both usages exit 0, both name the same fourteen
+        # flags in the same spellings, and the Vulkan one names those fourteen plus its own two, --size and --device.
+        # That is a check on the spellings and on the list being complete - a flag the argument loop accepts but the
+        # usage does not name can otherwise be found only by reading the source - and it is not a check that the two
+        # texts read alike, which no comparison of two --help outputs could make.
+        vk = vulkan_viewer(build_dir)
+        vk_note = vk_skip_note('nntc_view_vk was not built')
+        if vk:
+            vk_usage = run([vk, '--help'])
+            if vk_usage.returncode != 0:
+                raise SystemExit('FAIL: nntc_view_vk --help must exit 0, not %d' % vk_usage.returncode)
+            for flag in ('--shot', '--tex', '--cube', '--z', '--yaw', '--pitch', '--nomips', '--nobias',
+                         '--noaniso', '--renorm', '--raw0', '--raw1', '--bc', '--nooverlay', '--size', '--device'):
+                if flag not in vk_usage.stdout:
+                    raise SystemExit('FAIL: nntc_view_vk --help does not name %s' % flag)
+            vk_note = ''
+            print('  the review: nntc_view_vk --help exits 0 and names the same fourteen flags and its own two')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     record('the review fixes', 'the material is not overwritten by the _nntc descriptor and the refusal still fires '
                                'for -o material.json, a float-overflowing weight, a silent --weights, a '
                                'UTF-8 file name, --quiet, a byte-order mark and a parse position, a repeated key, the '
-                               'seed direction at 18 outputs, the clamp under --diag, the resolved paths, both usages')
+                               'seed direction at 18 outputs, the clamp under --diag, the resolved paths, and the '
+                               'usages of ' + ('both viewers' if os.name == 'nt' and not vk_note else
+                                               'the viewers that are here') + vk_note)
 
 
 def write_grey16(path, width, height):
@@ -2816,8 +2967,29 @@ def old_format_check(encode, build_dir):
         if 'older name of nntc-dds-1' not in proc.stdout:
             raise SystemExit('FAIL: the viewer must open the older format string with a note on stdout, not %r'
                              % proc.stdout[-300:])
-    record('the older format string', 'ntc-dds-1 is read as nntc-dds-1 with a note by the Python reader'
-           + (' and the viewer' if os.name == 'nt' else ''))
+    # The Vulkan viewer reads the same descriptor through the same header and owes the same note in the same words: a
+    # file one viewer opens and the other refuses would make every frame comparison meaningless. It is outside the
+    # Windows guard above because it needs no Direct3D frame and its --shot needs no desktop, so it runs on Linux too.
+    vk = vulkan_viewer(build_dir)
+    vk_note = vk_skip_note('nntc_view_vk was not built')
+    vk_ran = False
+    if vk:
+        got = vk_shot(vk, desc, os.path.join('out', 'tiny_oldformat', 'shot_vk.bmp'), [])
+        if got is None:
+            vk_note = vk_skip_note('this machine reports no Vulkan device')
+        elif 'older name of nntc-dds-1' not in got[2]:
+            raise SystemExit('FAIL: the Vulkan viewer must open the older format string with a note on stdout, not %r'
+                             % got[2][-300:])
+        else:
+            vk_note = ''
+            vk_ran = True
+    d3d_ran = os.name == 'nt'
+    if d3d_ran and vk_ran:
+        who = ' and both viewers'
+    else:
+        who = (' and the Direct3D viewer' if d3d_ran else '') + (' and the Vulkan viewer' if vk_ran else '')
+    record('the older format string', 'ntc-dds-1 is read as nntc-dds-1 with a note by the Python reader' + who
+           + vk_note)
     print('  the older format string: both readers accept ntc-dds-1 with a note')
 
 
@@ -2960,34 +3132,708 @@ def never_delete_check(encode):
 def viewer_refusal_checks(encode, build_dir):
     """The viewer refuses what the encoder refuses: an unknown flag, a malformed number, a flag with no value, and a
     --shot it could not write all exit 1 with an ERROR line, and a refused --shot writes no file. --tex outside the
-    material stays a warning with texture 0 shown, which the six-texture case asserts."""
-    if os.name != 'nt':
-        record('the viewer refusals', 'skipped (Windows only)')
-        return
-    view = executable(build_dir, 'nntc_view')
+    material stays a warning with texture 0 shown, which the six-texture case asserts.
+
+    The Direct3D half is Windows only; the Vulkan half is not, and runs wherever that viewer was built."""
     odir, prefix = out_asset('tiny_view_refuse')
     proc = run([encode, os.path.join('tests', 'tiny.png'), '-o', odir, '--png', '0', '--quiet'])
     if proc.returncode != 0:
         raise SystemExit('FAIL: the encode for the viewer refusals returned %d' % proc.returncode)
     desc = prefix + '_nntc.json'
     shot = os.path.join(odir, 'frame.bmp')
-    for label, extra, phrase in (('an unknown flag', ['--bogus'], 'unknown option'),
-                                 ('a malformed --tex', ['--tex', 'nope'], '--tex needs'),
-                                 ('a malformed --z', ['--z', '1.5x'], '--z needs'),
-                                 ('a --shot with no name', [], '--shot needs')):
-        cmd = [view, desc, '--nooverlay', '--shot', shot] + extra if label != 'a --shot with no name' else [view, desc, '--shot']
-        bad = run(cmd)
-        if bad.returncode != 1 or phrase not in bad.stderr:
-            raise SystemExit('FAIL: the viewer must refuse %s with exit 1 and %r, not %d %r'
-                             % (label, phrase, bad.returncode, bad.stderr[-200:]))
-    missing = os.path.join(odir, 'no_such_dir', 'frame.bmp')
-    bad = run([view, desc, '--nooverlay', '--shot', missing])
-    if bad.returncode != 1 or 'cannot write' not in bad.stderr or os.path.exists(missing):
-        raise SystemExit('FAIL: a --shot into a missing directory must exit 1 and write nothing, not %d %r'
-                         % (bad.returncode, bad.stderr[-200:]))
+    d3d_done = os.name == 'nt'
+    if not d3d_done:
+        print('  the viewer refusals: the Direct3D viewer is Windows only; its arm is skipped')
+    else:
+        view = executable(build_dir, 'nntc_view')
+        for label, extra, phrase in (('an unknown flag', ['--bogus'], 'unknown option'),
+                                     ('a malformed --tex', ['--tex', 'nope'], '--tex needs'),
+                                     ('a malformed --z', ['--z', '1.5x'], '--z needs'),
+                                     ('a --shot with no name', [], '--shot needs')):
+            cmd = [view, desc, '--nooverlay', '--shot', shot] + extra if label != 'a --shot with no name' else [view, desc, '--shot']
+            bad = run(cmd)
+            if bad.returncode != 1 or phrase not in bad.stderr:
+                raise SystemExit('FAIL: the viewer must refuse %s with exit 1 and %r, not %d %r'
+                                 % (label, phrase, bad.returncode, bad.stderr[-200:]))
+        missing = os.path.join(odir, 'no_such_dir', 'frame.bmp')
+        bad = run([view, desc, '--nooverlay', '--shot', missing])
+        if bad.returncode != 1 or 'cannot write' not in bad.stderr or os.path.exists(missing):
+            raise SystemExit('FAIL: a --shot into a missing directory must exit 1 and write nothing, not %d %r'
+                             % (bad.returncode, bad.stderr[-200:]))
+    # The Vulkan viewer's argument loop is the same loop with the same spellings and the same two parsers, so it owes
+    # the same five refusals with the same phrases. It is a second arm of this case rather than a case of its own
+    # because what is being asserted is that the two programs refuse ALIKE.
+    vk = vulkan_viewer(build_dir)
+    vk_done = False
+    vk_note = vk_skip_note('nntc_view_vk was not built')
+    if vk:
+        vk_shot_path = os.path.join(odir, 'frame_vk.bmp')
+        probe = run([vk, desc, '--nooverlay', '--shot', vk_shot_path, '--size', '64', '64'])
+        if probe.returncode != 0 and 'no Vulkan device' in probe.stderr:
+            vk_note = vk_skip_note('this machine reports no Vulkan device')
+            print('  the Vulkan viewer refusals: skipped, no Vulkan device on this machine')
+        elif probe.returncode != 0:
+            raise SystemExit('FAIL: the Vulkan viewer could not draw the asset the refusals are checked on: %r'
+                             % probe.stderr[-300:])
+        else:
+            for label, extra, phrase in (('an unknown flag', ['--bogus'], 'unknown option'),
+                                         ('a malformed --tex', ['--tex', 'nope'], '--tex needs'),
+                                         ('a malformed --z', ['--z', '1.5x'], '--z needs'),
+                                         ('a --shot with no name', [], '--shot needs')):
+                cmd = ([vk, desc, '--nooverlay', '--shot', vk_shot_path] + extra if label != 'a --shot with no name'
+                       else [vk, desc, '--shot'])
+                bad = run(cmd)
+                if bad.returncode != 1 or phrase not in bad.stderr:
+                    raise SystemExit('FAIL: the Vulkan viewer must refuse %s with exit 1 and %r, not %d %r'
+                                     % (label, phrase, bad.returncode, bad.stderr[-200:]))
+            vk_missing = os.path.join(odir, 'no_such_dir_vk', 'frame.bmp')
+            bad = run([vk, desc, '--nooverlay', '--shot', vk_missing])
+            if bad.returncode != 1 or 'cannot write' not in bad.stderr or os.path.exists(vk_missing):
+                raise SystemExit('FAIL: a Vulkan --shot into a missing directory must exit 1 and write nothing, not '
+                                 '%d %r' % (bad.returncode, bad.stderr[-200:]))
+            # And the two flags this viewer has that the other one does not, which no other case reaches: a --size
+            # with one value where two are needed, a --size below the 16 the loop accepts, a --device that is not a
+            # number at all (atoi would have read it as device 0), and a --device past the end, which must say how
+            # many devices the machine has rather than only that the index is wrong.
+            for label, extra, phrase in (('a --size with one value', ['--size', '640'], '--size needs'),
+                                         ('a --size below the minimum', ['--size', '8', '8'], '--size needs'),
+                                         ('a --device that is not a number', ['--device', 'nope'], '--device needs'),
+                                         ('a --device past the end', ['--device', '99'], 'this machine has')):
+                bad = run([vk, desc, '--nooverlay', '--shot', vk_shot_path] + extra)
+                if bad.returncode != 1 or phrase not in bad.stderr:
+                    raise SystemExit('FAIL: the Vulkan viewer must refuse %s with exit 1 and %r, not %d %r'
+                                     % (label, phrase, bad.returncode, bad.stderr[-200:]))
+            vk_done = True
+            vk_note = ''
+            print('  the Vulkan viewer refusals: the same five, with the same phrases and the same exit code, and '
+                  'its own four on --size and --device')
     record('the viewer refusals', 'an unknown flag, a malformed number, a valueless --shot and an unwritable --shot all '
-           'exit 1; the refused shot writes no file')
+           'exit 1; the refused shot writes no file'
+           + (' -- and the same five on the Vulkan viewer, plus its own --size and --device refusals' if vk_done
+              else vk_note)
+           + ('' if d3d_done else ' (the Direct3D arm is Windows only)'))
     print('  the viewer refusals: exit 1 on an unknown flag, a malformed number, a valueless --shot, an unwritable shot')
+
+
+def frame_size(path):
+    """The width and height of a .bmp the viewers wrote, from its header.
+
+    The depth is asserted here rather than assumed, because every caller of this goes on to treat the file as a 24-bit
+    bottom-up frame: rows of three bytes with a four-byte pitch, which is what both viewers write and what
+    tools/frame_diff.py and bmp_rows below both read. A viewer that started writing 32-bit frames would otherwise be
+    caught only by a comparison failing somewhere else, saying the wrong thing about why.
+    """
+    data = open(os.path.join(ROOT, path), 'rb').read()
+    if data[:2] != b'BM' or len(data) < 54:
+        raise SystemExit('FAIL: %s is not a .bmp' % path)
+    planes, depth = struct.unpack_from('<HH', data, 26)
+    if planes != 1 or depth != 24:
+        raise SystemExit('FAIL: %s has %d plane(s) at %d bits; the viewers write 24-bit single-plane frames'
+                         % (path, planes, depth))
+    return struct.unpack_from('<ii', data, 18)
+
+
+def bmp_rows(path, first, last, columns=None):
+    """Rows `first` up to `last` of a .bmp the viewers wrote, TOP-FIRST, as one block of bytes.
+
+    `columns`, when it is given, keeps only that many pixels from the left of each row. The overlay comparison between
+    the two viewers needs it since stage 4: the Vulkan strip carries a decode-path token at a fixed column near its
+    right-hand end that the Direct3D viewer has no state for and cannot grow, so the two strips are asserted identical
+    over the columns they SHARE rather than over the whole width.
+
+    The file itself is bottom-up, so row y from the top is the row at (height - 1 - y) in the file, and every row is
+    padded to a multiple of four bytes which is not part of the picture. The overlay case compares the strip's own
+    rows with the rows under it, and doing that on raw file bytes would compare a strip at the top of one frame with
+    whatever is at the bottom of the other.
+    """
+    data = open(os.path.join(ROOT, path), 'rb').read()
+    if data[:2] != b'BM' or len(data) < 54:
+        raise SystemExit('FAIL: %s is not a .bmp' % path)
+    offset = struct.unpack_from('<I', data, 10)[0]
+    width, height = struct.unpack_from('<ii', data, 18)
+    if first < 0 or last > height or first > last:
+        raise SystemExit('FAIL: rows %d..%d asked of %s, which is %d rows tall' % (first, last, path, height))
+    pitch = (width * 3 + 3) & ~3
+    keep = width * 3 if columns is None else min(width, columns) * 3
+    return b''.join(data[offset + (height - 1 - y) * pitch:offset + (height - 1 - y) * pitch + keep]
+                    for y in range(first, last))
+
+
+def frame_diff(a, b, max_diff, min_psnr, what):
+    """tools/frame_diff.py on two frames, refusing when either threshold is missed.
+
+    The comparison is the script's and not this file's on purpose: it is the same tool a reader runs by hand when a
+    frame looks wrong, so the number in a gate failure and the number on the command line are produced by one piece of
+    code. It returns the line the script printed, so a passing run can say what the difference actually was rather
+    than only that it was allowed.
+    """
+    proc = run([sys.executable, os.path.join('tools', 'frame_diff.py'), a, b,
+                '--max-diff', str(max_diff), '--min-psnr', str(min_psnr)])
+    if proc.returncode != 0:
+        raise SystemExit('FAIL: %s: the two viewers\' frames differ more than allowed: %s'
+                         % (what, proc.stderr.strip()[-300:] or proc.stdout.strip()[-300:]))
+    psnr = re.search(r'PSNR ([0-9.]+|inf)', proc.stdout)
+    worst = re.findall(r'max \|diff\| (\d+)', proc.stdout)
+    return '%s: max %s, PSNR %s dB' % (what, max(int(w) for w in worst) if worst else '?',
+                                       psnr.group(1) if psnr else '?')
+
+
+def vulkan_viewer_checks(encode, build_dir):
+    """The Vulkan viewer against the Direct3D one, on the same assets, frame by frame.
+
+    Stage 2 of docs/VULKAN_VIEWER_PLAN.md draws the asset, so the question this case asks is no longer "did it clear"
+    but "is it the same picture". Both viewers render the same asset headless with no overlay and tools/frame_diff.py
+    reports the largest absolute difference per channel and the PSNR between the two frames.
+
+    THE TWO FRAMES ARE NOT EXPECTED TO BE IDENTICAL and that must not be written into a gate: the rasteriser's fill
+    rule, the bilinear weight precision (both APIs specify a minimum number of fractional bits, not an exact value),
+    the block-compression palette evaluation and anisotropic tap placement are all free to differ. What is asserted is
+    that the difference is small enough to be one of those rather than a bug -- a wrong UV orientation, a missed y
+    flip, a dropped LOD bias or a feature vector in the wrong order would every one of them be far larger.
+
+    The two thresholds are deliberately different and the reason is not a tolerance being widened until it passes. The
+    default device is the one the Direct3D viewer also draws on, so the comparison there is between two APIs on ONE
+    sampler and is tight. --device 1 is a different vendor's sampler, so the comparison there is between two filters
+    that round their weights differently, and it is looser by exactly that much.
+
+    Two things about the sizes. The Vulkan --shot creates no window, so it renders at whatever size it is given;
+    the Direct3D one renders into its WINDOW, which Windows clamps to the desktop's work area. So the Direct3D frame is
+    taken first and the Vulkan one is asked for that size, because two frames of different shapes are two different
+    projections. And the filter toggles are exercised at --z -50 rather than at the default camera: a 64x64 asset on a
+    2560-wide frame is MAGNIFIED at the default distance, where mips, the level-1 bias and anisotropy all have nothing
+    to do, so a toggle that changed the frame there would mean something was wrong.
+
+    WHICH CAMERA A PAIR IS TAKEN AT decides what the pair can catch. At the default camera the quad is magnified and
+    the two frames come out byte-identical here, so those pairs test the y flip and the UV orientation and nothing
+    else - their thresholds are never approached, let alone exercised. The pairs at --z -50 --noaniso are where mips
+    and the level-1 bias are live and where a difference would actually be a finding, so the states that matter are
+    compared there as well.
+
+    The whole case is SKIPPED, never failed, when the executable was not built (a tree with no Vulkan SDK) or when the
+    machine has no Vulkan device (a headless build agent, a remote session with no driver). Gate coverage of the
+    Direct3D viewer cannot regress either way, because none of it is touched here. Off Windows there is no Direct3D
+    viewer to compare against, so every pair is skipped with that reason and the arms that need no second viewer -
+    the toggles, the flags, --bc, the overlay, the refusals, --help and the five identical launches - run as they do
+    here.
+    """
+    started = time.perf_counter()
+    view = vulkan_viewer(build_dir)
+    if not view:
+        record('the Vulkan viewer', 'skipped (nntc_view_vk was not built; this tree has no Vulkan SDK)')
+        print('  the Vulkan viewer: skipped, nntc_view_vk is not under %s' % build_dir)
+        return
+    cross = os.name == 'nt'   # the Direct3D viewer, and so every cross-viewer pair below, is Windows only
+    d3d = executable(build_dir, 'nntc_view') if cross else None
+    if not cross:
+        print('  the Vulkan viewer: the cross-viewer pairs are skipped, the Direct3D viewer is Windows only')
+
+    odir, prefix = out_asset('tiny_vk')
+    proc = run([encode, os.path.join('tests', 'tiny.png'), '-o', odir, '--png', '0', '--quiet'])
+    if proc.returncode != 0:
+        raise SystemExit('FAIL: the encode for the Vulkan viewer case returned %d' % proc.returncode)
+    desc = prefix + '_nntc.json'
+
+    # The first launch is also the probe: a machine with no driver says so and the case is skipped, not failed.
+    single_vk = os.path.join('out', 'vk_tiny_t0.bmp')
+    probe = run([view, desc, '--nooverlay', '--shot', single_vk] + VK_PLAIN)
+    if probe.returncode != 0 and 'no Vulkan device' in probe.stderr:
+        record('the Vulkan viewer', 'skipped (this machine reports no Vulkan device)')
+        print('  the Vulkan viewer: skipped, no Vulkan device on this machine')
+        return
+    if probe.returncode != 0:
+        raise SystemExit('FAIL: nntc_view_vk --shot returned %d: %r' % (probe.returncode, probe.stderr[-300:]))
+    # That probe asked for no --size, so it also pins the default: 2560x1440, the Direct3D viewer's window size, and
+    # 24 bits, which frame_size asserts. Every comparison in this file is of two frames of one shape, and the default
+    # is the shape a reader gets when they run the viewer by hand.
+    if frame_size(single_vk) != (2560, 1440):
+        raise SystemExit('FAIL: nntc_view_vk --shot with no --size must be 2560x1440, not %dx%d'
+                         % frame_size(single_vk))
+    print('  the Vulkan viewer: --shot with no --size is a 2560x1440 24-bit frame')
+    # The two portability lines, which are start-up and not a flag: the depth attachment's format is chosen from what
+    # the device reports rather than assumed to be D32_SFLOAT, and the 1.3 features the viewer draws every frame with
+    # are queried by name rather than inferred from the version number. Both are asserted because a silent regression
+    # in either is a program that runs here and refuses to draw on someone else's machine.
+    depth = re.search(r'^depth format: (D32_SFLOAT|X8_D24_UNORM_PACK32|D16_UNORM)$', probe.stdout, re.MULTILINE)
+    if not depth:
+        raise SystemExit('FAIL: nntc_view_vk printed no chosen depth format at start-up: %r' % probe.stdout[:400])
+    if not re.search(r'^features: dynamicRendering and synchronization2 both reported$', probe.stdout, re.MULTILINE):
+        raise SystemExit('FAIL: nntc_view_vk printed no Vulkan 1.3 feature check at start-up: %r' % probe.stdout[:400])
+    print('  the Vulkan viewer: the depth format is chosen from the device (%s) and the 1.3 features are queried by '
+          'name' % depth.group(1))
+    # The devices this viewer can actually draw on, which is not every line it printed: an unusable device's line
+    # carries a disqualifier after two spaces and a dash ("no graphics queue", "a graphics queue, but no family that
+    # can present to this surface", "below Vulkan 1.3", "no VK_KHR_swapchain"),
+    # and asking for one with --device is a refusal rather than a second measurement. The name is kept so that the
+    # summary can say which part the second comparison was made on.
+    devices = {}
+    chosen = re.search(r'^drawing on device (\d+):', probe.stdout, re.MULTILINE)
+    chosen_device = chosen.group(1) if chosen else '-1'
+    for m in re.finditer(r'^device (\d+): (.*)$', probe.stdout, re.MULTILINE):
+        if ' - ' not in m.group(2):
+            devices[m.group(1)] = m.group(2).strip()
+
+    # THE REFUSAL THIS MACHINE CANNOT REACH, checked by looking for the hardware rather than by assuming it is absent.
+    # The encoder's default level 0 is a BC4 / BC5 pair, and a device that does not report textureCompressionBC cannot
+    # sample it at all; the viewer refuses such an asset from the DESCRIPTOR, before any .dds is opened, naming the
+    # format and the encode that would produce an uncompressed level 0 instead. Every device on this machine reports
+    # the feature, so there is nothing here to refuse - and the honest form of that is to look for a device that lacks
+    # it, assert the refusal on the first one found, and SKIP WITH THE REASON when there is none, rather than to write
+    # a check that silently tests nothing. The viewer says so in one 'note:' line at start-up, which is what is read.
+    bc_probe = os.path.join('out', 'vk_bc_probe.bmp')
+    no_bc = None
+    for index in sorted(devices, key=int):
+        seen = run([view, desc, '--nooverlay', '--shot', bc_probe, '--size', '64', '64', '--device', index] + VK_PLAIN)
+        if 'does not report textureCompressionBC' in seen.stdout + seen.stderr:
+            no_bc = index
+            break
+    if no_bc is None:
+        bc_note = ('the BC-asset refusal skipped, every device on this machine reports textureCompressionBC, so it is '
+                   'unreachable here')
+    else:
+        bad = run([view, desc, '--nooverlay', '--shot', bc_probe, '--size', '64', '64', '--device', no_bc] + VK_PLAIN)
+        named = 'BC4_UNORM_BLOCK' in bad.stderr or 'BC5_UNORM_BLOCK' in bad.stderr
+        if bad.returncode != 1 or not named or '--bc0 0' not in bad.stderr:
+            raise SystemExit('FAIL: a BC asset on a device with no textureCompressionBC must exit 1 naming the format '
+                             'and the uncompressed encode, not %d %r' % (bad.returncode, bad.stderr[-300:]))
+        if '.dds' in bad.stdout:
+            raise SystemExit('FAIL: the BC refusal must come from the descriptor, before any .dds is opened: %r'
+                             % bad.stdout[-300:])
+        bc_note = ('the BC-asset refusal names the format and the uncompressed encode, before any .dds is opened '
+                   '(device %s)' % no_bc)
+    print('  the Vulkan viewer: %s' % bc_note)
+
+    def pair(asset, tag, extra, max_diff=8, min_psnr=40.0, device=None):
+        """One asset drawn by both viewers at one camera, and the two frames compared."""
+        if not cross:
+            raise SystemExit('FAIL: a cross-viewer pair was asked for where there is no Direct3D viewer')
+        a = os.path.join('out', 'vk_%s_d3d.bmp' % tag)
+        b = os.path.join('out', 'vk_%s_vk.bmp' % tag)
+        shot(d3d, asset, a, extra)
+        w, h = frame_size(a)
+        cmd = [view, asset, '--nooverlay', '--shot', b, '--size', str(w), str(h)] + VK_PLAIN + extra
+        if device is not None:
+            cmd += ['--device', str(device)]
+        made = run(cmd)
+        if made.returncode != 0:
+            raise SystemExit('FAIL: nntc_view_vk --shot returned %d on %s: %r' % (made.returncode, asset,
+                                                                                  made.stderr[-300:]))
+        return frame_diff(a, b, max_diff, min_psnr, tag)
+
+    # The default-camera pairs. They are the y flip and the UV orientation and not much more: the quad is magnified
+    # here, so every sampler state that could differ has nothing to do and the two frames come out byte-identical on
+    # this machine. The pairs below at --z -50 are the ones whose thresholds mean anything.
+    lines = [pair(desc, 'tiny_t0', ['--tex', '0'])] if cross else []
+
+    # A material, so that a second output triple is decoded and shown: --tex 1 reads outv[3..5] of the same shader.
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix='nntc_vk_')
+    try:
+        crops = crop_inputs(tmp, 2, 32)
+        modir, mprefix = out_asset('tiny_vk_mat', 'c0')
+        proc = run([encode] + crops + ['-o', modir, '--png', '0', '--quiet'])
+        if proc.returncode != 0:
+            raise SystemExit('FAIL: the two-texture encode for the Vulkan viewer case returned %d' % proc.returncode)
+        mdesc = mprefix + '_nntc.json'
+        if cross:
+            lines.append(pair(mdesc, 'mat_t0', ['--tex', '0']))
+            lines.append(pair(mdesc, 'mat_t1', ['--tex', '1']))
+        # Five identical launches on this stage's other asset too, so the claim covers a material and not only a
+        # single image: a frame that is not a function of the command line and the asset alone cannot be the basis of
+        # any of the comparisons above.
+        vk_shot_stable(view, mdesc, os.path.join('out', 'vk_mat_stable.bmp'), ['--tex', '1'])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # A two-file level 0: a BC5 of channels 0-1 and a BC4 of channel 2 alone, which is the path where the shader reads
+    # a third texture and sel.z says so. A viewer that ignored the second file would draw a recognisable, wrong picture,
+    # so the comparison against the Direct3D frame is what asserts it, not the return code.
+    codir, cprefix = out_asset('tiny_vk_c0_3')
+    proc = run([encode, os.path.join('tests', 'tiny.png'), '-o', codir, '--l0', 'bc8', '--c0', '3', '--png', '0',
+                '--quiet'])
+    if proc.returncode != 0:
+        raise SystemExit('FAIL: the --c0 3 encode for the Vulkan viewer case returned %d' % proc.returncode)
+    if cross:
+        lines.append(pair(cprefix + '_nntc.json', 'c0_3', ['--tex', '0']))
+
+        # THE MINIFIED CAMERA, where the sampler states are live. --noaniso because anisotropic tap placement is one
+        # of the things the plan's section 1.14 says is free to differ between two APIs; everything else about the
+        # fetch is not, so the threshold here is 2 out of 255 rather than the 8 the default-camera pairs carry. The
+        # second pair drops level 1's LOD bias as well, which is the state the format's section 5 is about: if the
+        # bias reached one viewer's sampler and not the other's, THIS is the comparison that says so.
+        lines.append(pair(desc, 'far_noaniso', ['--tex', '0', '--z', '-50', '--noaniso'], max_diff=2))
+        lines.append(pair(desc, 'far_nobias', ['--tex', '0', '--z', '-50', '--noaniso', '--nobias'], max_diff=2))
+        # And the two Vulkan frames must differ FROM EACH OTHER. Two pairs that both passed would prove nothing if
+        # --nobias had quietly done nothing at this camera: the pair would then be comparing one state twice.
+        biased = open(os.path.join(ROOT, 'out', 'vk_far_noaniso_vk.bmp'), 'rb').read()
+        unbiased = open(os.path.join(ROOT, 'out', 'vk_far_nobias_vk.bmp'), 'rb').read()
+        if biased == unbiased:
+            raise SystemExit('FAIL: at --z -50 --noaniso the Vulkan frames with and without level 1\'s LOD bias are '
+                             'the same bytes, so the two pairs above compare one state twice')
+        print('  the Vulkan viewer: at --z -50 --noaniso the frames with and without --nobias differ from each other')
+
+    # The three filter toggles, at a distance where each one has something to do. Each must CHANGE the frame: a flag
+    # that is parsed and then reaches no sampler is worse than one that is refused.
+    far = ['--z', '-50']
+    base = os.path.join('out', 'vk_far_base.bmp')
+    if run([view, desc, '--nooverlay', '--shot', base] + VK_PLAIN + far).returncode != 0:
+        raise SystemExit('FAIL: nntc_view_vk --shot at --z -50 failed')
+    base_bytes = open(os.path.join(ROOT, base), 'rb').read()
+    for flag in ('--nomips', '--nobias', '--noaniso'):
+        changed = os.path.join('out', 'vk_far%s.bmp' % flag.replace('-', '_'))
+        if run([view, desc, '--nooverlay', '--shot', changed] + VK_PLAIN + far + [flag]).returncode != 0:
+            raise SystemExit('FAIL: nntc_view_vk --shot with %s failed' % flag)
+        if open(os.path.join(ROOT, changed), 'rb').read() == base_bytes:
+            raise SystemExit('FAIL: %s did not change the Vulkan viewer\'s frame, so it reaches no sampler' % flag)
+    print('  the Vulkan viewer: --nomips, --nobias and --noaniso each change the frame at --z -50')
+
+    # Stage 3's flags, each of which must reach something. --raw0 and --raw1 replace the decode with a latent as
+    # stored and --renorm renormalises the shown triple, so all three change the frame of any asset.
+    base3 = vk_shot(view, desc, os.path.join('out', 'vk_flags_base.bmp'), [])[0]
+    for flag in ('--raw0', '--raw1', '--renorm'):
+        changed = vk_shot(view, desc, os.path.join('out', 'vk_flags%s.bmp' % flag.replace('-', '_')), [flag])[0]
+        if changed == base3:
+            raise SystemExit('FAIL: %s did not change the Vulkan viewer\'s frame, so it reaches no shader constant'
+                             % flag)
+    print('  the Vulkan viewer: --raw0, --raw1 and --renorm each change the frame')
+
+    # "It changes the frame" says only that the flag reached something. What it reached has to be the SAME something
+    # the other viewer's flag reaches, and only a comparison against that viewer says so: --raw0 showing level 1, a
+    # --renorm that renormalised the wrong triple or a --cube whose faces were wound the other way would every one of
+    # them change the frame and be wrong. Each is compared with anisotropy off, for the reason the far pairs give.
+    if cross:
+        for flag in ('--raw0', '--raw1', '--renorm', '--cube'):
+            lines.append(pair(desc, 'flag' + flag.replace('-', '_'), ['--noaniso', flag], max_diff=2))
+
+    # Key 4 and its flag, both ways round. On the encoder's default level 0 the file already holds optimised BC
+    # blocks, there is nothing for the viewer to pack and --bc must do NOTHING; on an uncompressed level 0 the pack is
+    # made at load and --bc binds it, which is a different picture. Both halves matter: a --bc that silently did
+    # nothing everywhere would pass the first check alone.
+    if vk_shot(view, desc, os.path.join('out', 'vk_bc_file.bmp'), ['--bc'])[0] != base3:
+        raise SystemExit('FAIL: --bc changed the frame of an asset whose level 0 is already block-compressed, where '
+                         'the Vulkan viewer has no pack of its own to bind')
+    updir, uprefix = out_asset('tiny_vk_unc')
+    proc = run([encode, os.path.join('tests', 'tiny.png'), '-o', updir, '--l0', 'palette', '--bc0', '0', '--png', '0',
+                '--quiet'])
+    if proc.returncode != 0:
+        raise SystemExit('FAIL: the uncompressed-level-0 encode for the Vulkan viewer case returned %d'
+                         % proc.returncode)
+    udesc = uprefix + '_nntc.json'
+    plain = vk_shot(view, udesc, os.path.join('out', 'vk_unc_plain.bmp'), [])
+    packed = vk_shot(view, udesc, os.path.join('out', 'vk_unc_bc.bmp'), ['--bc'])
+    if 'packed at load' not in packed[2]:
+        raise SystemExit('FAIL: the Vulkan viewer must pack an uncompressed level 0 at load and say so: %r'
+                         % packed[2][-300:])
+    if plain[0] == packed[0]:
+        raise SystemExit('FAIL: --bc did not change the frame of an uncompressed level 0, so the load-time pack is '
+                         'not bound')
+    print('  the Vulkan viewer: --bc binds the load-time pack of an uncompressed level 0 and does nothing on a BC one')
+
+    # And the pack itself, across the two viewers: both make it at load from the same shared/bc_pack.h over the same
+    # uncompressed plane, so the BLOCKS are the same bytes and the only thing left to differ is the sampler. With
+    # anisotropy off the two frames are identical, so that is what is asserted - max 0, not a tolerance - and a
+    # difference of any size would mean one of them packed something else.
+    if cross:
+        lines.append(pair(udesc, 'bc_pack', ['--noaniso', '--bc'], max_diff=0))
+
+    # The overlay. --nooverlay is what every comparison above relies on, so the gate has to know the strip was there
+    # to leave off: the same frame with and without it must differ.
+    with_strip = os.path.join('out', 'vk_overlay_on.bmp')
+    without = os.path.join('out', 'vk_overlay_off.bmp')
+    made = run([view, desc, '--shot', with_strip, '--size', '640', '480'] + VK_PLAIN)
+    if made.returncode != 0:
+        raise SystemExit('FAIL: nntc_view_vk --shot with the overlay returned %d: %r' % (made.returncode,
+                                                                                         made.stderr[-300:]))
+    if vk_shot(view, desc, without, [])[0] == open(os.path.join(ROOT, with_strip), 'rb').read():
+        raise SystemExit('FAIL: --nooverlay drew the same frame as a shot with the overlay, so the debug strip is '
+                         'not being drawn at all')
+    print('  the Vulkan viewer: the overlay is drawn, and --nooverlay leaves it off')
+
+    # THE STRIP ITSELF, across the two viewers, which is the check the comment here used to promise and not make. The
+    # overlay is the same font, the same scale, the same layout and the same words rasterised by the same code, so its
+    # 84 rows are asserted BYTE-IDENTICAL between the viewers - at the Direct3D frame's own size, since the strip is a
+    # fixed number of pixels and a frame of another shape puts different pixels under it. Below those rows each frame
+    # must equal that viewer's own --nooverlay frame, which is what says the strip is drawn OVER the scene and changes
+    # nothing under it - and it is why every comparison in this case may use --nooverlay in the first place.
+    if cross:
+        ov_d3d = os.path.join('out', 'vk_overlay_d3d.bmp')
+        ov_vk = os.path.join('out', 'vk_overlay_vk.bmp')
+        no_d3d = os.path.join('out', 'vk_overlay_d3d_off.bmp')
+        no_vk = os.path.join('out', 'vk_overlay_vk_off.bmp')
+        made = run([d3d, desc, '--shot', ov_d3d, '--noaniso'])
+        if made.returncode != 0:
+            raise SystemExit('FAIL: nntc_view --shot with the overlay returned %d' % made.returncode)
+        w, h = frame_size(ov_d3d)
+        for cmd in ([d3d, desc, '--nooverlay', '--noaniso', '--shot', no_d3d],
+                    [view, desc, '--noaniso', '--shot', ov_vk, '--size', str(w), str(h)] + VK_PLAIN,
+                    [view, desc, '--nooverlay', '--noaniso', '--shot', no_vk, '--size', str(w), str(h)] + VK_PLAIN):
+            made = run(cmd)
+            if made.returncode != 0:
+                raise SystemExit('FAIL: an overlay-case --shot returned %d: %r' % (made.returncode,
+                                                                                   made.stderr[-300:]))
+        if frame_size(ov_vk) != frame_size(ov_d3d):
+            raise SystemExit('FAIL: the two overlay frames are not the same shape, so their rows cannot be compared')
+        # Over the columns the two strips SHARE. The Vulkan one carries its decode-path token at VK_COOP_COLUMN,
+        # which is past the end of anything the four shared lines print and which the Direct3D viewer has no state
+        # for; everything to the left of it is the same font, the same scale, the same layout and the same words
+        # rasterised by the same code, so it is asserted byte-identical exactly as it always was.
+        if bmp_rows(ov_d3d, 0, 84, VK_COOP_COLUMN) != bmp_rows(ov_vk, 0, 84, VK_COOP_COLUMN):
+            raise SystemExit('FAIL: the two viewers\' 84 overlay rows are not byte-identical over the columns they '
+                             'share, so the debug strip is not the same strip')
+        for tag, on, off in (('Direct3D', ov_d3d, no_d3d), ('Vulkan', ov_vk, no_vk)):
+            if bmp_rows(on, 84, h) != bmp_rows(off, 84, h):
+                raise SystemExit('FAIL: below its 84 overlay rows the %s frame differs from its own --nooverlay '
+                                 'frame, so the strip is changing the scene under it' % tag)
+        print('  the Vulkan viewer: the overlay\'s 84 rows are byte-identical to the Direct3D viewer\'s, and below '
+              'them each frame equals its own --nooverlay frame')
+
+
+    # STAGE 4: THE COOPERATIVE-VECTOR DECODE PATH, and the whole of what a gate can assert about it.
+    #
+    # It is optional at run time by construction - one vendor, no portable successor - so every line below is SKIPPED
+    # with the device's own reason rather than failed when the query did not pass, exactly as the whole case is skipped
+    # on a machine with no Vulkan at all. The arms are four:
+    #
+    #   the PICTURE, which is the point: the same asset drawn by the two pipelines must be the same picture. The
+    #   threshold is 4 out of 255 and 50 dB, and it is not a tolerance chosen to pass - it is what 11 bits of mantissa
+    #   in the weights can do to an 8-bit output. An fp16 conversion error, a layout mismatch, a wrong M or K or a
+    #   padding bug would all be far larger, and would look like "a bit off" if the threshold were widened instead;
+    #
+    #   the REFUSAL: --coopvec 1 on a device that has no such extension exits 1 with an ERROR line. A run that quietly
+    #   fell back would be a measurement of the other path under the name of this one;
+    #
+    #   the MEASUREMENT: --bench runs on both paths and prints a number for each. The numbers themselves are not
+    #   asserted - a gate that pinned a frame time would fail on a busy machine and say nothing about correctness -
+    #   but that both paths can be timed at all is;
+    #
+    #   the OVERLAY: the state line's decode-path token, which is the only thing about the two frames' debug strips
+    #   that differs. It is asserted at 2560x1440 because the strip is 2560 pixels wide at 1:1 and a narrower frame
+    #   clips its right-hand end, where the token is.
+    cv_line = next((l for l in probe.stdout.splitlines() if l.startswith('cooperative vectors: ')), '')
+    cv_here = cv_line.startswith('cooperative vectors: available')
+    cv_asset = os.path.join('examples', 'm1_m4_c0_3_c1_4_nntc.json')
+    cv_reason = cv_line.split(' - ', 1)[1] if ' - ' in cv_line else 'the device query did not pass'
+    # The refusal a build compiled against headers older than 1.4.307 prints. It is not a failure and it is not a
+    # property of the machine: the arms below are skipped exactly as they are on a device without the extension, and
+    # the summary says which of the two it was. (On Linux, where this build is the usual one, the gate as a whole
+    # needs the encoder and does not run - but this arm's Linux behaviour is stated here rather than left to be
+    # discovered.)
+    cv_compiled_out = 'predate VK_NV_cooperative_vector' in cv_reason
+    # WHICH device the stage-4 arms run on. The default device is the first discrete GPU that can present, and on a
+    # machine where that part has no cooperative vectors and a second one does - a laptop whose discrete GPU is not
+    # the NVIDIA part, say - skipping the whole stage would be reporting the machine's device order rather than the
+    # viewer. So where the default cannot, every other usable device is PROBED with the flag itself, and the first
+    # that draws a frame carries the arms; only when none can is the stage skipped, with the default's own reason.
+    cv_dev = []
+    cv_device = chosen_device
+    # A build with the extension compiled out cannot take the path on ANY device, so probing the other devices with
+    # --coopvec 1 would be asking every one of them the same question the build has already answered.
+    if not cv_here and not cv_compiled_out and os.path.isfile(os.path.join(ROOT, cv_asset)):
+        for index in devices:
+            if index == str(chosen_device):
+                continue
+            probe_cv = run([view, cv_asset, '--nooverlay', '--shot', os.path.join('out', 'vk_coop_probe.bmp'),
+                            '--size', '64', '64', '--device', index, '--coopvec', '1'])
+            if probe_cv.returncode == 0:
+                cv_here, cv_dev, cv_device = True, ['--device', index], index
+                print('  the Vulkan viewer: device %s (%s) carries the cooperative-vector arms, because the default '
+                      'device cannot (%s)' % (index, devices[index], cv_reason))
+                break
+    cv_note = ''
+    if not cv_here and cv_compiled_out:
+        cv_note = '; the cooperative-vector arms skipped (this build has them compiled out: %s)' % cv_reason
+        print('  the Vulkan viewer: the cooperative-vector arms are skipped, this build has them compiled out - %s'
+              % cv_reason)
+    elif not cv_here:
+        cv_note = '; the cooperative-vector arms skipped (%s)' % cv_reason
+        print('  the Vulkan viewer: the cooperative-vector arms are skipped, %s' % cv_reason)
+    elif not os.path.isfile(os.path.join(ROOT, cv_asset)):
+        cv_note = '; the cooperative-vector arms skipped (%s is not in this tree)' % cv_asset
+        print('  the Vulkan viewer: the cooperative-vector arms are skipped, %s is not in this tree' % cv_asset)
+    else:
+        cv_frames = {}
+        for flag in ('1', '0'):
+            out = os.path.join('out', 'vk_coop_%s.bmp' % flag)
+            made = run([view, cv_asset, '--nooverlay', '--noaniso', '--shot', out, '--size', '640', '480',
+                        '--coopvec', flag] + cv_dev)
+            if made.returncode != 0:
+                raise SystemExit('FAIL: nntc_view_vk --coopvec %s --shot returned %d: %r'
+                                 % (flag, made.returncode, made.stderr[-300:]))
+            cv_frames[flag] = (out, made.stdout)
+        # The two runs must have taken DIFFERENT paths, and the viewer says which at start-up. Without this the
+        # comparison below could be one path against itself and would pass for the wrong reason.
+        if 'decode: cooperative vectors' not in cv_frames['1'][1] or 'decode: plain' not in cv_frames['0'][1]:
+            raise SystemExit('FAIL: --coopvec 1 and --coopvec 0 did not report the two decode paths: %r / %r'
+                             % (cv_frames['1'][1][-200:], cv_frames['0'][1][-200:]))
+        print('  the Vulkan viewer, the two decode paths on %s: %s'
+              % (os.path.basename(cv_asset),
+                 frame_diff(cv_frames['1'][0], cv_frames['0'][0], 4, 50.0, 'cooperative vectors vs plain')))
+
+        # The refusal, on a device that has no cooperative vectors. On this machine that is device 1, the integrated
+        # part; where every usable device has the extension there is nothing to refuse and the arm says so.
+        refused = False
+        for index in devices:
+            if index == str(cv_device):
+                continue
+            bad_cv = run([view, cv_asset, '--nooverlay', '--shot', os.path.join('out', 'vk_coop_refuse.bmp'),
+                          '--size', '64', '64', '--device', index, '--coopvec', '1'])
+            if bad_cv.returncode == 0:
+                continue        # that device has the extension too, so there is nothing to refuse there
+            # Exit 1 for something OTHER than the flag is that device's own business and not this arm's: a part whose
+            # driver will not open the asset at all, or one whose depth formats or 1.3 features this viewer refuses,
+            # says so on stderr and is passed over. What this arm is looking for is a device that runs everything
+            # else and refuses THIS flag, which is the only thing that proves the refusal is not a silent fall back.
+            if bad_cv.returncode != 1 or 'ERROR: --coopvec 1' not in bad_cv.stderr:
+                first = next((l for l in bad_cv.stderr.splitlines() if l.startswith('ERROR')), '').strip()
+                print('  the Vulkan viewer: device %s is passed over for the --coopvec 1 refusal, it exits %d for '
+                      'another reason (%s)' % (index, bad_cv.returncode, first or 'no ERROR line'))
+                continue
+            refused = True
+            print('  the Vulkan viewer: --coopvec 1 on device %s (%s) is refused with an ERROR and exit 1'
+                  % (index, devices[index]))
+            break
+        if not refused:
+            print('  the Vulkan viewer: the --coopvec 1 refusal is skipped, every usable device here has the '
+                  'extension')
+
+        # --bench on both paths. What is asserted is that each run exits 0 and prints its two microsecond figures;
+        # the figures themselves belong in viewer_vk/README.md, where they are quoted as measured.
+        for flag in ('1', '0'):
+            timed = run([view, cv_asset, '--nooverlay', '--bench', '20', '--size', '640', '480',
+                         '--coopvec', flag] + cv_dev)
+            if timed.returncode != 0:
+                raise SystemExit('FAIL: --bench 20 --coopvec %s returned %d: %r'
+                                 % (flag, timed.returncode, timed.stderr[-300:]))
+            if not re.search(r'^bench: 20 frames at 640x480, decode .*: mean [0-9.]+ us, min [0-9.]+ us',
+                             timed.stdout, re.MULTILINE):
+                raise SystemExit('FAIL: --bench 20 --coopvec %s printed no mean and minimum: %r'
+                                 % (flag, timed.stdout[-300:]))
+        print('  the Vulkan viewer: --bench 20 times both decode paths and prints a mean and a minimum for each')
+
+        # The strip. Left of the token the two frames' 84 overlay rows are the same bytes - the state line is the same
+        # words either way - and the whole strip is not, which is the token itself.
+        strips = []
+        for flag in ('1', '0'):
+            out = os.path.join('out', 'vk_coop_ovl_%s.bmp' % flag)
+            made = run([view, cv_asset, '--noaniso', '--shot', out, '--size', '2560', '1440',
+                        '--coopvec', flag] + cv_dev)
+            if made.returncode != 0:
+                raise SystemExit('FAIL: the overlay --shot with --coopvec %s returned %d' % (flag, made.returncode))
+            strips.append(out)
+        if bmp_rows(strips[0], 0, 84, VK_COOP_COLUMN) != bmp_rows(strips[1], 0, 84, VK_COOP_COLUMN):
+            raise SystemExit('FAIL: the two decode paths\' overlay strips differ left of the decode-path token, so '
+                             'something other than that token changed')
+        if bmp_rows(strips[0], 0, 84) == bmp_rows(strips[1], 0, 84):
+            raise SystemExit('FAIL: the overlay strip is the same bytes on both decode paths, so its Coop token is '
+                             'not being drawn')
+        print('  the Vulkan viewer: the overlay strip differs between the two decode paths in its Coop token alone')
+        cv_note = ('; the two decode paths are the same picture on %s, --coopvec 1 is refused where the extension is '
+                   'absent, --bench times both, and the strip differs in its Coop token alone'
+                   % os.path.basename(cv_asset))
+
+    # The second device, when there is one. This is the point of --device: the baseline path is the product and must
+    # run on a non-NVIDIA part, and on this machine device 1 is the integrated Radeon. Only a USABLE device is asked
+    # for - an unusable one is a refusal, not a second measurement - and its name goes into the summary, because
+    # "on both devices" says nothing about which part the number came from.
+    second = None
+    if cross and '1' in devices:
+        second = devices['1']
+        lines.append(pair(desc, 'tiny_dev1', ['--tex', '0'], max_diff=16, min_psnr=40.0, device=1))
+    elif cross:
+        print('  the Vulkan viewer: --device 1 skipped, this machine has no second usable Vulkan device')
+
+    for line in lines:
+        print('  the Vulkan viewer vs the Direct3D one, %s' % line)
+
+    # Five launches, five identical files. It is a stronger claim here than for the other viewer, because --shot
+    # creates no window and no surface at all, so there is no keystroke to receive and no compositor in the way.
+    if run([view, desc, '--nooverlay', '--shot', single_vk] + VK_PLAIN).returncode != 0:
+        raise SystemExit('FAIL: nntc_view_vk --shot failed on the first of the five identical launches')
+    identical = open(os.path.join(ROOT, single_vk), 'rb').read()
+    for i in range(1, 5):
+        again = run([view, desc, '--nooverlay', '--shot', single_vk] + VK_PLAIN)
+        if again.returncode != 0:
+            raise SystemExit('FAIL: nntc_view_vk --shot returned %d on launch %d' % (again.returncode, i + 1))
+        if open(os.path.join(ROOT, single_vk), 'rb').read() != identical:
+            raise SystemExit('FAIL: two headless nntc_view_vk --shot launches drew different frames (run %d of 5)'
+                             % (i + 1))
+    print('  the Vulkan viewer: 5 --shot launches are byte-identical (%d bytes)' % len(identical))
+
+    if run([view, '--help']).returncode != 0:
+        raise SystemExit('FAIL: nntc_view_vk --help must exit 0')
+    bad = run([view, '--bogus'])
+    if bad.returncode != 1 or 'unknown option' not in bad.stderr:
+        raise SystemExit('FAIL: nntc_view_vk must refuse an unknown flag with exit 1, not %d %r'
+                         % (bad.returncode, bad.stderr[-200:]))
+
+    # A SHADER THAT DOES NOT COMPILE, at startup. Since the viewer reads its two GLSL files from beside the executable
+    # and from nowhere else, the only way to hand it a broken one is to break the copy beside a copy of the
+    # executable: both shaders and the exe go into a scratch directory, view.frag there is overwritten with something
+    # that is not GLSL, and the run must print SHADER ERROR, exit 1 and write no frame - not a blank picture and an
+    # exit code of 0. Key R with a broken shader takes the same compile through the same function, and it cannot be
+    # driven from here at all (there is no window to press R in), so it stays a by-hand check.
+    bad_dir = os.path.join('out', 'vk_badshader')
+    os.makedirs(os.path.join(ROOT, bad_dir), exist_ok=True)
+    src_dir = os.path.dirname(os.path.join(ROOT, view))
+    exe_name = os.path.basename(view)
+    for name in (exe_name, 'view.vert', 'view.frag'):
+        shutil.copyfile(os.path.join(src_dir, name), os.path.join(ROOT, bad_dir, name))
+    with open(os.path.join(ROOT, bad_dir, 'view.frag'), 'w') as f:
+        f.write('this is not a shader, and the point is that it is not\n')
+    bad_frame = os.path.join(bad_dir, 'frame.bmp')
+    if os.path.exists(os.path.join(ROOT, bad_frame)):
+        os.remove(os.path.join(ROOT, bad_frame))
+    bad = run([os.path.join(bad_dir, exe_name), desc, '--nooverlay', '--shot', bad_frame, '--size', '64', '64']
+              + VK_PLAIN)
+    if bad.returncode != 1 or 'SHADER ERROR' not in bad.stderr or os.path.exists(os.path.join(ROOT, bad_frame)):
+        raise SystemExit('FAIL: a broken view.frag beside the executable must exit 1 with SHADER ERROR and write no '
+                         'frame, not %d %r' % (bad.returncode, bad.stderr[-300:]))
+    print('  the Vulkan viewer: a broken view.frag beside the executable is SHADER ERROR, exit 1 and no frame')
+
+    # AND THE OTHER HALF OF THAT RULE: the good copy beside the executable is read even when the WORKING DIRECTORY has
+    # a broken view.frag of its own. The case above proves a broken shader is not ignored; this one proves which of
+    # two candidate files is the one that gets compiled, which is the part a change to exe_dir could silently break.
+    # The copied executable from the badshader directory cannot serve - its own view.frag is the broken one - so the
+    # run is the ordinary executable, started from a scratch directory that holds two files named like the shaders and
+    # containing nothing that compiles. Every path is absolute, because the working directory is no longer the tree.
+    cwd_dir = os.path.join(ROOT, 'out', 'vk_cwd_decoy')
+    os.makedirs(cwd_dir, exist_ok=True)
+    for name in ('view.vert', 'view.frag'):
+        with open(os.path.join(cwd_dir, name), 'w') as f:
+            f.write('this file is in the working directory and must never be the one that is compiled\n')
+    cwd_frame = os.path.join(cwd_dir, 'frame.bmp')
+    if os.path.exists(cwd_frame):
+        os.remove(cwd_frame)
+    from_cwd = subprocess.run([os.path.abspath(os.path.join(ROOT, view)), os.path.abspath(os.path.join(ROOT, desc)),
+                               '--nooverlay', '--shot', cwd_frame, '--size', '64', '64'] + VK_PLAIN,
+                              cwd=cwd_dir, capture_output=True, text=True, encoding='utf-8', errors='replace')
+    compiled = re.search(r'^shaders compiled: (.*)$', from_cwd.stdout, re.MULTILINE)
+    exe_here = os.path.dirname(os.path.abspath(os.path.join(ROOT, view)))
+    if from_cwd.returncode != 0 or not compiled or not os.path.exists(cwd_frame):
+        raise SystemExit('FAIL: the viewer started from a directory holding a decoy view.frag must still compile the '
+                         'shaders beside its executable, not %d %r' % (from_cwd.returncode, from_cwd.stderr[-300:]))
+    for one in compiled.group(1).split(', '):
+        if os.path.dirname(os.path.abspath(one)) != exe_here:
+            raise SystemExit('FAIL: the viewer compiled %r, which is not beside its executable (%s)' % (one, exe_here))
+    print('  the Vulkan viewer: started from a directory with a decoy view.frag, the shaders beside the executable '
+          'are still the ones compiled')
+
+    seconds = time.perf_counter() - started
+    record('the Vulkan viewer',
+           ('the same picture as the Direct3D viewer on a single image, a two-texture material (--tex 0 and 1) and a '
+            'two-file level 0 at the default camera, and at --z -50 --noaniso with and without level 1\'s bias, where '
+            'the two frames differ from each other; --raw0, --raw1, --renorm, --cube and the load-time BC pack each '
+            'compared against that viewer too; the overlay\'s 84 rows byte-identical between the viewers and the rows '
+            'below them equal to each viewer\'s own --nooverlay frame'
+            + (', and the same asset on %s through --device 1' % second if second else '')
+            if cross else
+            'the cross-viewer pairs skipped (the Direct3D viewer is Windows only)')
+           + cv_note
+           + '; the filter toggles, --raw0, --raw1 and --renorm each change the frame, --bc binds the load-time pack '
+             'of an uncompressed level 0 and does nothing on a BC one, the overlay is drawn and --nooverlay leaves it '
+             'off, --shot with no --size is 2560x1440, five launches byte-identical, a broken shader exits 1, the '
+             'shaders are read from beside the executable and not from the working directory, --help exits 0 and an '
+             'unknown flag exits 1; ' + bc_note + ' (%.0f s)' % seconds)
+    print('  the Vulkan viewer: --help exits 0 and an unknown flag exits 1; the Vulkan arms took %.0f s' % seconds)
 
 
 def absolute_path_check(encode, build_dir):
@@ -3098,6 +3944,7 @@ def main():
     bare_command_check(encode)
     old_format_check(encode, build_dir)
     viewer_refusal_checks(encode, build_dir)
+    vulkan_viewer_checks(encode, build_dir)
     absolute_path_check(encode, build_dir)
     never_delete_check(encode)
     argument_and_status_checks(encode)

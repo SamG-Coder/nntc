@@ -10,18 +10,22 @@ both) -- and the pixel shader (`bin/nntc_view.hlsl`) dequantises the samples, bu
 The window, device, swap chain, camera, quad and cube, samplers, constant buffers, debug overlay and frame loop are
 the author's `shader_deblocking_d3d11` sample's (Apache 2.0, the text is `LICENSE` at the root), and `main.cpp` keeps
 that sample's dense one-statement-per-line formatting rather than the encoder's. New here: the DX10 `.dds` loader (uncompressed 8-bit and BC4 / BC5, the levels base-first and
-tightly packed), the JSON reading (sheredom's single-header `json.h`, public domain, wrapped by `nntc_json.h`; both
-live in `../src/` now, because the encoder reads material JSON with the same two headers), the
-decoder constant buffer and the shader.
+tightly packed, its parsing in `../shared/dds.h` and its Direct3D tail here), the JSON reading (sheredom's
+single-header `json.h`, public domain, wrapped by `nntc_json.h`; both live in `../shared/` with everything else more
+than one program in this tree reads), the decoder constant buffer and the shader.
 
 ## Building
 
-`nntc_view` and `bc_check` are built by the repository's root CMakeLists on Windows:
+`nntc_view` and `bc_check` are built by the repository's root CMakeLists on Windows. Neither needs CUDA: on a
+machine without the toolkit the root CMakeLists skips the encoder and builds them alone, so the plain command is
 
 ```
-cmake -B build -S . -G "Visual Studio 17 2022" -T cuda=13.1
+cmake -B build -S . -G "Visual Studio 18 2026"
 cmake --build build --config Release
 ```
+
+and a machine that also builds the encoder adds the CUDA toolset (`-T cuda=13.4`, or `-G "Visual Studio 17 2022"
+-T cuda=13.1`), as the root README's Building section describes.
 
 `nntc_view.hlsl` is copied next to the executable by the build; the viewer compiles it at runtime from the working
 directory or from beside the executable, so it can be edited and reloaded with `R`.
@@ -108,7 +112,7 @@ stored in two files binds its second file to `t2`, the overlay's format reads `(
 
 The **load-time pack** below exists for the other case only: a level 0 that arrives **uncompressed** in the file, which
 is `--l0 palette --bc0 0` or the `_u` twin `--bc0 both` writes. Then the viewer packs its whole mip chain with
-`../src/bc_pack.h`, the same encoder `nntc_encode` seeds its own pack with, and key `4` switches between the two
+`../shared/bc_pack.h`, the same encoder `nntc_encode` seeds its own pack with, and key `4` switches between the two
 (`--bc` starts on the pack). That pack is the SEED pack - the stb_dxt-style choice the encoder starts its refinement
 from, not the choice it ships - so it is a comparison and a validation of `bc_pack.h`, and not what a default asset
 contains. The layout is the same either way:

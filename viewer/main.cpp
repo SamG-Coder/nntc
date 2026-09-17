@@ -278,8 +278,9 @@ static bool load_shader(const std::string& path) {
 }
 static void reload_shader() { if (!load_shader(g.shader_path)) fprintf(stderr, "Shader reload failed, keeping previous shader.\n"); }
 
-#include "nntc_json.h"   // the JSON reader, in src/ and shared with bc_check.cpp and the encoder
+#include "nntc_json.h"   // the JSON reader, in shared/ and shared with bc_check.cpp and the encoder
 #include "bc_pack.h"   // the BC4 / BC5 encoder, decoder and level packer (validated by bc_check.cpp against bcdec)
+#include "dds.h"   // the DX10 .dds parsing, in shared/ because the Vulkan viewer reads the same files through it
 
 // Level 0's packed textures from its .dds levels, in bc_pack.h's own file rule: channels 0-1 into a BC5 (a BC4 when that
 // is all there is), and what is left into a second texture - a BC5 for a fourth channel, a BC4 for a third one alone. It
@@ -336,40 +337,25 @@ static bool bc_pack_level0(LatentTex& L) {
 // how the encoder writes level 0 by default: a level is then ceil(w/4) x ceil(h/4) blocks of 8 or 16 bytes, so the subresource pitch is
 // the block ROW's byte count and not a texel row's. `second` loads the SECOND file of a two-file level 0 into the same LatentTex, which
 // is bound to the slot the load-time pack already uses for channels 2-3.
+//
+// The parsing itself is shared/dds.h, which is this function's own header walk lifted out so that the Vulkan viewer reads the same
+// bytes through the same checks; what is left here is the Direct3D tail, which is all that was ever api-specific.
 // ---------------------------------------------------------------------------
 static bool load_dds(const std::string& path, LatentTex& L, bool second = false) {
-    std::string data = read_file(path);
-    if (data.size() < 148) { fprintf(stderr, "ERROR: cannot read '%s' (or too short)\n", path.c_str()); return false; }
-    const uint32_t* h = (const uint32_t*)data.data();
-    if (h[0] != 0x20534444u || h[1] != 124 || h[19] != 32 || h[20] != 0x4u || h[21] != 0x30315844u) { fprintf(stderr, "ERROR: '%s' is not a DX10 .dds\n", path.c_str()); return false; }
-    const int H = (int)h[3], W = (int)h[4], nmip = (int)h[7], dxgi = (int)h[32], dim = (int)h[33], arr = (int)h[35];
-    if (dim != 3 || arr != 1) { fprintf(stderr, "ERROR: '%s': not a 2D texture (dimension %d, array size %d)\n", path.c_str(), dim, arr); return false; }
-    // The three header fields a malformed file can turn into a crash rather than an error: a dimension read as a signed
-    // int wraps negative, and a mip count is a vector's size below. They are bounded here, before anything is sized
-    // from them - 16384 is D3D11's own texture limit, and a chain cannot be longer than the base's log2.
-    if (W < 1 || W > 16384 || H < 1 || H > 16384) { fprintf(stderr, "ERROR: '%s': %dx%d is not a size this reader accepts (1..16384)\n", path.c_str(), W, H); return false; }
-    int max_mips = 1; for (int n = W > H ? W : H; n > 1; n >>= 1) max_mips++;
-    if (nmip < 1 || nmip > 15 || nmip > max_mips) { fprintf(stderr, "ERROR: '%s': %d mip levels for a %dx%d base (1..%d)\n", path.c_str(), nmip, W, H, max_mips < 15 ? max_mips : 15); return false; }
-    const bool bc = dxgi == 80 || dxgi == 83;
-    const int block_bytes = dxgi == 80 ? 8 : 16;
-    const int C = dxgi == 61 ? 1 : (dxgi == 49 ? 2 : (dxgi == 28 ? 4 : (dxgi == 80 ? 1 : (dxgi == 83 ? 2 : 0))));
-    if (!C) { fprintf(stderr, "ERROR: '%s': DXGI format %d is not R8 / R8G8 / R8G8B8A8 / BC4_UNORM / BC5_UNORM\n", path.c_str(), dxgi); return false; }
+    DdsImage img;
+    if (!dds_read(path, img)) return false;
+    const int W = img.W, H = img.H, nmip = img.mips, dxgi = img.dxgi, C = img.channels;
+    const bool bc = img.bc;
     // The two files of one level share the extent and the level count, and NOT the format: a three-channel level 0 is a
     // BC5 of channels 0-1 and a BC4 of channel 2, so only that both are block-compressed (or neither is) is required.
     if (second && (W != L.W || H != L.H || nmip != L.mips)) { fprintf(stderr, "ERROR: '%s' does not match the first file of this level (%dx%d, %d level%s)\n", path.c_str(), L.W, L.H, L.mips, L.mips == 1 ? "" : "s"); return false; }
     if (second && bc != L.file_bc) { fprintf(stderr, "ERROR: '%s' is %s where the first file of this level is not\n", path.c_str(), bc ? "block-compressed" : "uncompressed"); return false; }
     std::vector<D3D11_SUBRESOURCE_DATA> subs(nmip);
-    size_t off = 148; int w = W, hh = H;
-    std::vector<size_t> level_off(nmip); std::vector<std::pair<int, int>> level_dim(nmip);
+    std::vector<std::pair<int, int>> level_dim(nmip);
     for (int i = 0; i < nmip; i++) {
-        const int bx = (w + 3) / 4, by = (hh + 3) / 4;
-        const size_t n = bc ? (size_t)bx * by * block_bytes : (size_t)w * hh * C;
-        if (off + n > data.size()) { fprintf(stderr, "ERROR: '%s' is truncated at level %d\n", path.c_str(), i); return false; }
-        subs[i].pSysMem = data.data() + off; subs[i].SysMemPitch = (UINT)(bc ? bx * block_bytes : w * C); subs[i].SysMemSlicePitch = 0;
-        level_off[i] = off; level_dim[i] = { w, hh };
-        off += n; w = w > 1 ? w >> 1 : 1; hh = hh > 1 ? hh >> 1 : 1;
+        subs[i].pSysMem = img.bytes.data() + img.levels[i].offset; subs[i].SysMemPitch = (UINT)img.levels[i].pitch; subs[i].SysMemSlicePitch = 0;
+        level_dim[i] = { img.levels[i].w, img.levels[i].h };
     }
-    if (off != data.size()) { fprintf(stderr, "ERROR: '%s': %zu bytes of pixel data expected, %zu present\n", path.c_str(), off - 148, data.size() - 148); return false; }
     DXGI_FORMAT fmt = (DXGI_FORMAT)dxgi;
     D3D11_TEXTURE2D_DESC td{};
     td.Width = (UINT)W; td.Height = (UINT)H; td.MipLevels = (UINT)nmip; td.ArraySize = 1;
@@ -387,7 +373,7 @@ static bool load_dds(const std::string& path, LatentTex& L, bool second = false)
         safe_release(L.srv); safe_release(L.tex);
         L.tex = tex; L.srv = srv; L.W = W; L.H = H; L.stored_C = C; L.mips = nmip; L.dxgi = (int)fmt; L.file = path; L.file_bc = bc;
         L.raw.clear(); L.dims = level_dim;
-        if (!bc) { L.raw.resize(nmip); for (int i = 0; i < nmip; i++) L.raw[i].assign(data.begin() + level_off[i], data.begin() + level_off[i] + (size_t)level_dim[i].first * level_dim[i].second * C); }   // kept for the pack
+        if (!bc) { L.raw.resize(nmip); for (int i = 0; i < nmip; i++) L.raw[i].assign(img.bytes.begin() + img.levels[i].offset, img.bytes.begin() + img.levels[i].offset + img.levels[i].size); }   // kept for the pack
     }
     printf("  %s: %dx%d, %d mip level%s, DXGI format %d (%s, %d channel%s stored)\n", path.c_str(), W, H, nmip, nmip == 1 ? "" : "s", dxgi, bc ? (dxgi == 80 ? "BC4_UNORM" : "BC5_UNORM") : "uncompressed", C, C == 1 ? "" : "s");
     return true;

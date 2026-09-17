@@ -12,7 +12,7 @@ material (the count is in [How it works](#how-it-works-briefly), below). No runt
 
 It uses a bilinear/degree-2 polynomial decoder, i.e. a degree-2 polynomial whose only quadratic terms are the products between the two latents stored as standard BC4/BC5/uncompressed mipmapped textures. The full-resolution latent texture(s) represent edge/detail information, while the quarter-resolution latent texture represents slowly varying material/color state.
 
-The `nntc_view` is a Windows D3D11 viewer that loads the .json and .dds files and displays the sampled and decoded results on a textured quad or a cube, with keyboard camera controls.
+The `nntc_view` is a Windows D3D11 viewer that loads the .json and .dds files and displays the sampled and decoded results on a textured quad or a cube, with keyboard camera controls. `nntc_view_vk` is the same viewer on Vulkan, with the same window and keys, for Windows and Linux (`viewer_vk/README.md`).
 
 Importantly, this method is compatible with normal GPU texture hardware bilinear, trilinear, and anisotropic filtering. The encoder ensures the encoded latents and the fitted coefficients are compatible with hardware filtering. The end result: large runtime memory savings due to packing 2-6 correlated material textures into a single set of latent textures, which are sampled normally and then decoded by a small pixel shader function.
 
@@ -47,8 +47,14 @@ A Prior Art Disclosure, dated September 13, 2026 is [here](https://github.com/ri
 
 ## Building
 
-You need CMake, a C++17 compiler and the CUDA toolkit. CUDA 12.8 or newer is the minimum the build accepts; 13.4
-(VS 2026) and 13.3 (WSL) are what this tree is built and gated with.
+You need CMake, a C++17 compiler and, for the encoder, the CUDA toolkit. CUDA 12.8 or newer is the minimum the
+build accepts; 13.4 (VS 2026) and 13.3 (WSL) are what this tree is built and gated with.
+
+**CUDA is optional for the viewers.** CMake probes for a CUDA compiler: with one, the encoder is built; without one it
+prints `-- No CUDA compiler was found: the encoder nntc_encode is skipped` and builds the rest alone -- on Windows
+both viewers and `bc_check`, on Linux the Vulkan viewer (the Direct3D viewer and `bc_check` are Windows programs) --
+so an Arm laptop or an AMD or Intel box can build and run the viewer on assets encoded elsewhere (the `examples/`
+directory ships several; `build/nntc_view_vk examples/pavingstones141_1k_c0_4_nntc.json` opens one). The release gate needs the encoder and does not run on such a machine.
 
 Windows, the toolchain this tree is developed on -- **Visual Studio 2026 with CUDA 13.4** (CMake 4.2 or
 newer; the CMake bundled with VS 2026 is fine):
@@ -58,7 +64,14 @@ cmake -B build -S . -G "Visual Studio 18 2026" -T cuda=13.4
 cmake --build build --config Release
 ```
 
-That produces `build\Release\nntc_encode.exe`, `nntc_view.exe` and `bc_check.exe`.
+That produces `build\Release\nntc_encode.exe`, `nntc_view.exe` and `bc_check.exe`, and -- when the Vulkan SDK is
+installed -- `nntc_view_vk.exe`, the second viewer (`viewer_vk/README.md`).
+
+**The Vulkan SDK is optional.** It is what `find_package(Vulkan)` needs to find a loader and a `shaderc_combined`,
+which is how that viewer compiles its GLSL at runtime; this tree was built and measured against SDK 1.4.357.0. Without
+it -- or with an SDK that ships no `shaderc_combined` -- CMake prints one `-- ...nntc_view_vk is skipped` line at
+configure time, that one target is not built, everything else configures and builds exactly as before, and the release
+gate reports the Vulkan cases as skipped rather than failing them.
 
 Visual Studio 2022 with CUDA 13.1 is also supported and produces byte-identical assets:
 
@@ -67,23 +80,63 @@ cmake -B build -S . -G "Visual Studio 17 2022" -T cuda=13.1
 cmake --build build --config Release
 ```
 
-Linux:
+Linux (Release is the default when no build type is named; `-DCMAKE_BUILD_TYPE=Debug` asks for Debug):
 
 ```
-cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+cmake -B build -S .
+cmake --build build -j
 ```
 
-That produces `nntc_encode` only; the viewer is Direct3D 11 and Windows only. Verified under WSL 2 (Ubuntu 24.04,
+That produces `nntc_encode`, and `nntc_view_vk` wherever `find_package(Vulkan)` finds a loader and a shaderc --
+with a GLFW window when GLFW is found (native X11 or Wayland with a GLFW 3.4, X11 through Xwayland with the 3.3 of Ubuntu and Debian 12) and headless when it is not, since its `--shot` needs no window, no surface
+and no desktop. `nntc_view`, the Direct3D 11 viewer, is Windows only. Verified under WSL 2 (Ubuntu 24.04,
 gcc 13.3, CUDA 13.3 from NVIDIA's `wsl-ubuntu` apt repository): the gate passes and the asset it writes is
-byte-identical to the Windows build's -- on the default source chain. 
+byte-identical to the Windows build's -- on the default source chain.
+
+The packages, by distribution family. The encoder needs the CUDA toolkit on top of these; without `nvcc` the
+configure skips it and builds the viewer alone.
+
+| | packages |
+| --- | --- |
+| Debian, Ubuntu, Mint, Pop!_OS | `build-essential cmake pkg-config libvulkan-dev libshaderc-dev libglfw3-dev vulkan-tools`, plus the driver: `mesa-vulkan-drivers` for AMD and Intel, or the NVIDIA driver package (`nvidia-driver-NNN`, which carries its own Vulkan driver) (and `vulkan-validationlayers` for a Debug build) |
+| Fedora | `gcc-c++ cmake pkgconf vulkan-loader-devel vulkan-headers libshaderc-devel glfw-devel vulkan-tools`, plus the driver: `mesa-vulkan-drivers` for AMD and Intel, or the NVIDIA driver from RPM Fusion (and `vulkan-validation-layers`) |
+| Arch | `base-devel cmake vulkan-icd-loader vulkan-headers shaderc glfw vulkan-tools`, plus the driver for the part -- `vulkan-radeon`, `vulkan-intel` or `nvidia-utils` (and `vulkan-validation-layers`) |
+| openSUSE | `gcc-c++ cmake pkgconf-pkg-config vulkan-devel vulkan-headers shaderc-devel libglfw-devel vulkan-tools`, plus the driver: `libvulkan_radeon` or `libvulkan_intel`, or the NVIDIA driver (and `vulkan-validationlayers`) |
+
+The Debian and Ubuntu rows were used on real machines; the Fedora, Arch and openSUSE names are from those
+distributions' package indexes and have not been typed on a box here, so if one is wrong the package search of
+that distribution (`dnf search shaderc`, `pacman -Ss glfw`, `zypper se glfw`) is the fix.
+
+Two things about those lists are worth stating rather than discovering.
+
+**shaderc.** The viewer compiles its GLSL at run time, so it needs shaderc's library and header. On Linux the build
+prefers the distribution's SHARED `libshaderc`, because `libshaderc_combined.a` is not self-contained on every
+release -- Ubuntu 24.04's `libshaderc-dev` ships a 242 KB archive that defines neither `spvValidatorOptionsDestroy`
+nor `spvtools::Optimizer`, and a link against it alone fails on both -- while the shared library carries its
+dependencies as its own `NEEDED` entries. The combined archive stays the fallback, which is what a LunarG SDK install
+with no shared library on the path uses, and is what the Windows build links.
+
+**Cooperative vectors.** `VK_NV_cooperative_vector`, the accelerated decode path, first appears in Vulkan-Headers
+1.4.307. Older headers are the norm -- Ubuntu 22.04 ships 204, Debian 12 ships 239, Ubuntu 24.04 ships 275 -- and
+against them that path is COMPILED OUT: the configure says so in one line, the viewer says so in one line at
+start-up, `--coopvec 1` is refused with an error, and the plain GLSL decode draws. That is not a reduced build. The
+plain path is the product, it is what every measurement in this tree is of, and on AMD and Intel parts the extension
+does not exist at all, so it is what runs there in any case. To compile it in, install the LunarG SDK (or a
+distribution new enough to ship 1.4.307 headers) and point the configure at it with `-DVulkan_INCLUDE_DIR=...`, or
+let `find_package(Vulkan)` pick it up from `VULKAN_SDK`. Whether it then RUNS is still the device's own query.
+
+The floor for the viewer is Vulkan headers 204 -- 1.3 core, which is what every frame is recorded with. Anything
+older stops at a `#error` naming the package to install.
+
 
 Notes: A run whose mipmaps come from `stb_image_resize2` (a named filter, or the `box` implied by `srgb`, `edge` or
 `normal_map`) can differ
 in the last bit between platforms, so those runs agree across platforms in PSNR rather than byte for byte
 (`docs/DESIGN.md` section 6 has the measurement). Inside WSL, prefer the `cuda-toolkit-13-x` package: the `cuda` and
 `cuda-drivers` metapackages try to install a Linux driver, which WSL does not use (the driver is Windows'). Put
-`/usr/local/cuda-13.x/bin` on your PATH yourself.
+`/usr/local/cuda-13.x/bin` on your PATH yourself, and do it BEFORE the first configure: with `nvcc` off the PATH the
+build does not refuse, it skips the encoder, and the probe's answer is cached, so a tree configured too early keeps
+skipping it until you re-configure with `-UCMAKE_CUDA_COMPILER` (or delete the build directory).
 
 ## Encoding
 
@@ -222,6 +275,17 @@ the pixel shader. Keys:
 
 `--shot FILE.bmp` renders one frame and exits. `viewer/README.md` has the full list and the shader.
 
+There is a **second viewer on Vulkan**, `nntc_view_vk`, which draws the same asset through another graphics api with
+the same keys, the same fourteen flags plus `--size` and `--device`, and the same overlay -- the cheapest evidence there
+is that the format's claim is about *the* hardware sampling operator and not about one vendor's. On one GPU the two
+viewers' frames are byte-identical with anisotropy off, in every state a --shot can be put in. Its
+`--shot` needs no window, no surface and no desktop at all. On a device that offers
+`VK_NV_cooperative_vector` it also decodes through that extension's one matrix-vector instruction instead of the
+shader's own loop -- a second pipeline behind a runtime query, the same picture to 1 part in 255, and 4 to 5 times
+faster on the scene draw at 2560x1440; every other device never hears of it.
+`viewer_vk/README.md` has its key table, its flags, the parity numbers, the cooperative-vector measurements and what
+differs between the two.
+
 **If you write your own consumer**, the one thing to get right: **the quarter-resolution texture's sampler needs
 `MipLODBias = 2`** (the JSON's `lod_bias_level1`), so that both textures are read from the same mip. Everything else is
 `lo + sample * (hi - lo)` on each channel, then `out = W * [c, s, s*c] + b`. `docs/FORMAT.md` specifies the files byte
@@ -334,8 +398,8 @@ the method, `docs/MATHEMATICS.md` the notes for whoever changes it, `PRIOR_ART_D
 
 | path | licence |
 |---|---|
-| everything that is not third-party code: `src/` (except the three stb headers and `src/json.h`), `tools/`, `tests/`, `docs/`, `CMakeLists.txt`, the READMEs, `PRIOR_ART_DISCLOSURE.md`, `viewer/main.cpp`, `viewer/bin/nntc_view.hlsl`, `viewer/bc_check.cpp` | **Apache License 2.0**, Copyright (C) 2026 Richard Geldreich Jr. ([`LICENSE`](https://github.com/richgel999/nntc/blob/main/LICENSE)) |
-| `src/json.h` | public domain (Unlicense), [sheredom](https://github.com/sheredom/json.h) |
+| everything that is not third-party code: `src/` (except the three stb headers), `shared/` (except `shared/json.h`), `tools/`, `tests/`, `docs/`, `CMakeLists.txt`, the READMEs, `PRIOR_ART_DISCLOSURE.md`, `viewer/main.cpp`, `viewer/bin/nntc_view.hlsl`, `viewer/bc_check.cpp`, `viewer_vk/` | **Apache License 2.0**, Copyright (C) 2026 Richard Geldreich Jr. ([`LICENSE`](https://github.com/richgel999/nntc/blob/main/LICENSE)) |
+| `shared/json.h` | public domain (Unlicense), [sheredom](https://github.com/sheredom/json.h) |
 | `viewer/bcdec.h` | MIT / Unlicense dual, [iOrange](https://github.com/iOrange/bcdec) |
 | `src/stb_image.h`, `src/stb_image_write.h`, `src/stb_image_resize2.h` | public domain / MIT dual, [Sean Barrett](https://github.com/nothings/stb) |
 | `examples/PavingStones141_1K-PNG_*.png` | CC0, the PavingStones141 and another material from [ambientCG](https://ambientcg.com) |
