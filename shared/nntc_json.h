@@ -1,6 +1,7 @@
 // nntc_json.h: the small JSON reader, shared by the encoder (the MATERIAL json it can be given instead of a list of
-// images), the viewer and bc_check (the ASSET's own PREFIX_nntc.json). It sits in src/ because all three targets already
-// have src/ on their include path and the encoder became the third of them.
+// images), the viewers and bc_check (the ASSET's own PREFIX_nntc.json). It sits in shared/ with the other files more
+// than one program in this tree reads, which is where it went when a second viewer made src/ - the encoder's own
+// sources - the wrong home for it.
 // The parsing is sheredom's json.h (one header, public domain, https://github.com/sheredom/json.h); this file only lifts its
 // linked-list DOM into the small JVal tree the callers walk (objects, arrays, numbers, strings, true / false / null).
 #pragma once
