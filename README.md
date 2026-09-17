@@ -8,7 +8,7 @@ fitted matrix coefficients**. It outputs two `.dds` textures, or three when the 
 the whole material back from **two ordinary `Sample()` calls**, or three when the full-resolution plane has three or
 four channels, and one matrix multiply of a few dozen to a few hundred multiply-accumulates per pixel for the whole
 material (the count is in [How it works](#how-it-works-briefly), below). No runtime library, no decompression at load, no neural inference: the files are standard mipmapped `.dds`
-(BC4 / BC5 and 8-bit) and a `.json` containing the fitted bilinear model's decoder coefficients. 
+(BC4 / BC5 and 8-bit) and a `.json` containing the fitted bilinear model's decoder coefficients. The [VK_NV_cooperative_vector](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_cooperative_vector.html) extension is supported in the Vulkan viewer for potentially faster decoding.
 
 It uses a bilinear/degree-2 polynomial decoder, i.e. a degree-2 polynomial whose only quadratic terms are the products between the two latents stored as standard BC4/BC5/uncompressed mipmapped textures. The full-resolution latent texture(s) represent edge/detail information, while the quarter-resolution latent texture represents slowly varying material/color state.
 
