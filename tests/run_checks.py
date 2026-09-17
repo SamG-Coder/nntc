@@ -3132,7 +3132,11 @@ def never_delete_check(encode):
 def viewer_refusal_checks(encode, build_dir):
     """The viewer refuses what the encoder refuses: an unknown flag, a malformed number, a flag with no value, and a
     --shot it could not write all exit 1 with an ERROR line, and a refused --shot writes no file. --tex outside the
-    material stays a warning with texture 0 shown, which the six-texture case asserts.
+    material stays a warning with texture 0 shown, which the six-texture case asserts. A descriptor whose
+    lod_bias_level1 is outside [0, 8] is refused by name too: it is the number of mip levels level 1 is shifted by, and
+    both viewers turn it into a gradient scale of 2^it, so a hand-authored 99 would otherwise scale level 1's UV
+    derivatives by 2^99. (This replaces the refusal against the device's maxSamplerLodBias, which no longer constrains
+    anything: level 1's shift is in the gradients and no sampler carries a LOD bias.)
 
     The Direct3D half is Windows only; the Vulkan half is not, and runs wherever that viewer was built."""
     odir, prefix = out_asset('tiny_view_refuse')
@@ -3141,6 +3145,20 @@ def viewer_refusal_checks(encode, build_dir):
         raise SystemExit('FAIL: the encode for the viewer refusals returned %d' % proc.returncode)
     desc = prefix + '_nntc.json'
     shot = os.path.join(odir, 'frame.bmp')
+    # The same asset with one number changed. It sits in the SAME directory, so the .dds names inside it still resolve
+    # and the refusal is about the number and about nothing else.
+    with open(os.path.join(ROOT, desc), 'r', encoding='utf-8') as f:
+        good_json = f.read()
+    if '"lod_bias_level1": 2' not in good_json:
+        raise SystemExit('FAIL: the encoder no longer writes "lod_bias_level1": 2, so the refusal below tests nothing')
+    bias_desc = os.path.join(odir, os.path.basename(prefix) + '_badbias_nntc.json')
+    with open(os.path.join(ROOT, bias_desc), 'w', encoding='utf-8', newline='\n') as f:
+        f.write(good_json.replace('"lod_bias_level1": 2', '"lod_bias_level1": 99'))
+    # And the value a hand edit is likeliest to produce: a string where the number goes. It used to fall back to the
+    # default of 2 in silence and draw a plausible picture; it is refused by name like the out-of-range number.
+    nonnum_desc = os.path.join(odir, os.path.basename(prefix) + '_strbias_nntc.json')
+    with open(os.path.join(ROOT, nonnum_desc), 'w', encoding='utf-8', newline='\n') as f:
+        f.write(good_json.replace('"lod_bias_level1": 2', '"lod_bias_level1": "2"'))
     d3d_done = os.name == 'nt'
     if not d3d_done:
         print('  the viewer refusals: the Direct3D viewer is Windows only; its arm is skipped')
@@ -3160,6 +3178,14 @@ def viewer_refusal_checks(encode, build_dir):
         if bad.returncode != 1 or 'cannot write' not in bad.stderr or os.path.exists(missing):
             raise SystemExit('FAIL: a --shot into a missing directory must exit 1 and write nothing, not %d %r'
                              % (bad.returncode, bad.stderr[-200:]))
+        bad = run([view, bias_desc, '--nooverlay', '--shot', shot])
+        if bad.returncode != 1 or 'lod_bias_level1' not in bad.stderr:
+            raise SystemExit('FAIL: the viewer must refuse a lod_bias_level1 of 99 with exit 1 and the key named, not '
+                             '%d %r' % (bad.returncode, bad.stderr[-200:]))
+        bad = run([view, nonnum_desc, '--nooverlay', '--shot', shot])
+        if bad.returncode != 1 or 'lod_bias_level1 is not a number' not in bad.stderr:
+            raise SystemExit('FAIL: the viewer must refuse a lod_bias_level1 that is a string with exit 1 and say so, '
+                             'not %d %r' % (bad.returncode, bad.stderr[-200:]))
     # The Vulkan viewer's argument loop is the same loop with the same spellings and the same two parsers, so it owes
     # the same five refusals with the same phrases. It is a second arm of this case rather than a case of its own
     # because what is being asserted is that the two programs refuse ALIKE.
@@ -3191,6 +3217,14 @@ def viewer_refusal_checks(encode, build_dir):
             if bad.returncode != 1 or 'cannot write' not in bad.stderr or os.path.exists(vk_missing):
                 raise SystemExit('FAIL: a Vulkan --shot into a missing directory must exit 1 and write nothing, not '
                                  '%d %r' % (bad.returncode, bad.stderr[-200:]))
+            bad = run([vk, bias_desc, '--nooverlay', '--shot', vk_shot_path, '--size', '64', '64'])
+            if bad.returncode != 1 or 'lod_bias_level1' not in bad.stderr:
+                raise SystemExit('FAIL: the Vulkan viewer must refuse a lod_bias_level1 of 99 with exit 1 and the key '
+                                 'named, not %d %r' % (bad.returncode, bad.stderr[-200:]))
+            bad = run([vk, nonnum_desc, '--nooverlay', '--shot', vk_shot_path, '--size', '64', '64'])
+            if bad.returncode != 1 or 'lod_bias_level1 is not a number' not in bad.stderr:
+                raise SystemExit('FAIL: the Vulkan viewer must refuse a lod_bias_level1 that is a string with exit 1 and '
+                                 'say so, not %d %r' % (bad.returncode, bad.stderr[-200:]))
             # And the two flags this viewer has that the other one does not, which no other case reaches: a --size
             # with one value where two are needed, a --size below the 16 the loop accepts, a --device that is not a
             # number at all (atoi would have read it as device 0), and a --device past the end, which must say how
@@ -3207,12 +3241,13 @@ def viewer_refusal_checks(encode, build_dir):
             vk_note = ''
             print('  the Vulkan viewer refusals: the same five, with the same phrases and the same exit code, and '
                   'its own four on --size and --device')
-    record('the viewer refusals', 'an unknown flag, a malformed number, a valueless --shot and an unwritable --shot all '
-           'exit 1; the refused shot writes no file'
+    record('the viewer refusals', 'an unknown flag, a malformed number, a valueless --shot, an unwritable --shot and a '
+           'lod_bias_level1 outside [0, 8] all exit 1; the refused shot writes no file'
            + (' -- and the same five on the Vulkan viewer, plus its own --size and --device refusals' if vk_done
               else vk_note)
            + ('' if d3d_done else ' (the Direct3D arm is Windows only)'))
-    print('  the viewer refusals: exit 1 on an unknown flag, a malformed number, a valueless --shot, an unwritable shot')
+    print('  the viewer refusals: exit 1 on an unknown flag, a malformed number, a valueless --shot, an unwritable '
+          'shot, and a lod_bias_level1 outside [0, 8]')
 
 
 def frame_size(path):
@@ -3300,13 +3335,13 @@ def vulkan_viewer_checks(encode, build_dir):
     the Direct3D one renders into its WINDOW, which Windows clamps to the desktop's work area. So the Direct3D frame is
     taken first and the Vulkan one is asked for that size, because two frames of different shapes are two different
     projections. And the filter toggles are exercised at --z -50 rather than at the default camera: a 64x64 asset on a
-    2560-wide frame is MAGNIFIED at the default distance, where mips, the level-1 bias and anisotropy all have nothing
+    2560-wide frame is MAGNIFIED at the default distance, where mips, the level-1 LOD shift and anisotropy have nothing
     to do, so a toggle that changed the frame there would mean something was wrong.
 
     WHICH CAMERA A PAIR IS TAKEN AT decides what the pair can catch. At the default camera the quad is magnified and
     the two frames come out byte-identical here, so those pairs test the y flip and the UV orientation and nothing
     else - their thresholds are never approached, let alone exercised. The pairs at --z -50 --noaniso are where mips
-    and the level-1 bias are live and where a difference would actually be a finding, so the states that matter are
+    and the level-1 LOD shift are live and where a difference would actually be a finding, so the states that matter are
     compared there as well.
 
     The whole case is SKIPPED, never failed, when the executable was not built (a tree with no Vulkan SDK) or when the
@@ -3458,8 +3493,10 @@ def vulkan_viewer_checks(encode, build_dir):
         # THE MINIFIED CAMERA, where the sampler states are live. --noaniso because anisotropic tap placement is one
         # of the things the plan's section 1.14 says is free to differ between two APIs; everything else about the
         # fetch is not, so the threshold here is 2 out of 255 rather than the 8 the default-camera pairs carry. The
-        # second pair drops level 1's LOD bias as well, which is the state the format's section 5 is about: if the
-        # bias reached one viewer's sampler and not the other's, THIS is the comparison that says so.
+        # second pair drops level 1's LOD SHIFT as well, which is the state the format's section 5 is about: the shift
+        # is now a scale on the UV gradients handed to the level-1 SampleGrad / textureGrad rather than a sampler bias
+        # (an Intel Xe part blurred badly under the biased sampler), so if it reached one viewer's shader and not the
+        # other's, THIS is the comparison that says so.
         lines.append(pair(desc, 'far_noaniso', ['--tex', '0', '--z', '-50', '--noaniso'], max_diff=2))
         lines.append(pair(desc, 'far_nobias', ['--tex', '0', '--z', '-50', '--noaniso', '--nobias'], max_diff=2))
         # And the two Vulkan frames must differ FROM EACH OTHER. Two pairs that both passed would prove nothing if
@@ -3467,7 +3504,7 @@ def vulkan_viewer_checks(encode, build_dir):
         biased = open(os.path.join(ROOT, 'out', 'vk_far_noaniso_vk.bmp'), 'rb').read()
         unbiased = open(os.path.join(ROOT, 'out', 'vk_far_nobias_vk.bmp'), 'rb').read()
         if biased == unbiased:
-            raise SystemExit('FAIL: at --z -50 --noaniso the Vulkan frames with and without level 1\'s LOD bias are '
+            raise SystemExit('FAIL: at --z -50 --noaniso the Vulkan frames with and without level 1\'s LOD shift are '
                              'the same bytes, so the two pairs above compare one state twice')
         print('  the Vulkan viewer: at --z -50 --noaniso the frames with and without --nobias differ from each other')
 
@@ -3483,7 +3520,8 @@ def vulkan_viewer_checks(encode, build_dir):
         if run([view, desc, '--nooverlay', '--shot', changed] + VK_PLAIN + far + [flag]).returncode != 0:
             raise SystemExit('FAIL: nntc_view_vk --shot with %s failed' % flag)
         if open(os.path.join(ROOT, changed), 'rb').read() == base_bytes:
-            raise SystemExit('FAIL: %s did not change the Vulkan viewer\'s frame, so it reaches no sampler' % flag)
+            raise SystemExit('FAIL: %s did not change the Vulkan viewer\'s frame, so it reaches no sampler and no '
+                             'shader constant' % flag)
     print('  the Vulkan viewer: --nomips, --nobias and --noaniso each change the frame at --z -50')
 
     # Stage 3's flags, each of which must reach something. --raw0 and --raw1 replace the decode with a latent as
@@ -3820,7 +3858,7 @@ def vulkan_viewer_checks(encode, build_dir):
     seconds = time.perf_counter() - started
     record('the Vulkan viewer',
            ('the same picture as the Direct3D viewer on a single image, a two-texture material (--tex 0 and 1) and a '
-            'two-file level 0 at the default camera, and at --z -50 --noaniso with and without level 1\'s bias, where '
+            'two-file level 0 at the default camera, and at --z -50 --noaniso with and without level 1\'s LOD shift, where '
             'the two frames differ from each other; --raw0, --raw1, --renorm, --cube and the load-time BC pack each '
             'compared against that viewer too; the overlay\'s 84 rows byte-identical between the viewers and the rows '
             'below them equal to each viewer\'s own --nooverlay frame'
