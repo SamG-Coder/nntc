@@ -259,11 +259,17 @@ VK_NV_cooperative_vector, which arrived in 1.4.307; the plain path is used
 
 which is the same shape of refusal, in the same one line, as a device that does not offer the extension. `--coopvec 1`
 is refused with an `ERROR` and exit 1 exactly as it is there, `--bench` of that path with it, and the key K says so
-and stays plain. The configure says the same thing earlier, so the absence is readable before the build runs:
+and stays plain. The configure says the same thing earlier, as a CMake Warning, so the absence is readable before the
+build runs:
 
 ```
--- nntc_view_vk: Vulkan headers 1.x.275 in /usr/include - cooperative vectors are compiled OUT
-   (VK_NV_cooperative_vector needs 1.4.307 or newer); the plain decode path, which is the product, is what runs
+CMake Warning at CMakeLists.txt (message):
+  nntc_view_vk: Vulkan headers 1.x.275 in /usr/include - cooperative vectors are compiled OUT
+  (VK_NV_cooperative_vector needs 1.4.307 or newer). The viewer still builds and runs: it decodes with its
+  standard shader, which is the default on every GPU; the extension only makes the decode faster on recent
+  NVIDIA cards, so on AMD and Intel nothing is missing. For that faster path on an NVIDIA card under Linux,
+  build against newer headers: the LunarG SDK (source its setup-env.sh before cmake), or a distribution
+  whose vulkan-headers package is 1.4.307 or newer (Fedora 42, Arch, Debian 13)
 ```
 
 This is not a reduced build. The plain GLSL decode is the product; every claim this tree makes about the format is a

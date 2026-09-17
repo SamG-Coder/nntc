@@ -61,7 +61,11 @@ if(NOT CMAKE_CUDA_COMPILER)
         set(NNTC_WITHOUT_CUDA "nntc_view_vk still builds; nntc_view and bc_check are Windows programs")
     endif()
     message(WARNING "No CUDA compiler was found: the encoder nntc_encode is skipped (${NNTC_WITHOUT_CUDA}). "
-                   "To build it after installing CUDA, re-configure with -UCMAKE_CUDA_COMPILER")
+                    "The encoder needs the CUDA toolkit, 12.8 or newer: on Windows the CUDA installer with its Visual "
+                    "Studio integration, then -T cuda=13.4 (or your version) on the cmake line; on Linux the "
+                    "cuda-toolkit-13-x package from NVIDIA's repository (the distributions' own nvidia-cuda-toolkit "
+                    "is usually too old) with /usr/local/cuda/bin on the PATH. Then re-configure with "
+                    "-UCMAKE_CUDA_COMPILER, since the miss is cached")
 else()
 enable_language(CUDA)
 
@@ -214,10 +218,15 @@ if(NOT NNTC_SHADERC AND TARGET Vulkan::shaderc_combined)
 endif()
 
 if(NOT Vulkan_FOUND)
-    message(WARNING "Vulkan was not found: the target nntc_view_vk is skipped (everything else still builds)")
+    message(WARNING "Vulkan was not found: the target nntc_view_vk is skipped (everything else still builds). Install "
+                    "the Vulkan loader's development package (libvulkan-dev on Debian and Ubuntu, vulkan-loader-devel "
+                    "and vulkan-headers on Fedora, vulkan-devel on openSUSE, vulkan-icd-loader and vulkan-headers on "
+                    "Arch; the LunarG SDK on Windows) and run cmake again")
 elseif(NOT NNTC_SHADERC)
     message(WARNING "No shaderc was found (neither the SDK's shaderc_combined nor a shared libshaderc with its header): "
-                   "nntc_view_vk is skipped (it compiles its shaders at runtime)")
+                    "nntc_view_vk is skipped, since it compiles its shaders at run time. Install the shaderc development "
+                    "package (libshaderc-dev on Debian and Ubuntu, libshaderc-devel on Fedora, shaderc-devel on openSUSE, "
+                    "shaderc on Arch; on Windows it is part of the LunarG SDK) and run cmake again")
 else()
     message(STATUS "nntc_view_vk compiles its shaders with ${NNTC_SHADERC_WHICH}")
 
@@ -244,8 +253,12 @@ else()
     elseif(NNTC_VK_HEADER_VERSION LESS 307)
         message(WARNING "nntc_view_vk: Vulkan headers 1.x.${NNTC_VK_HEADER_VERSION} in ${Vulkan_INCLUDE_DIR} - "
                         "cooperative vectors are compiled OUT (VK_NV_cooperative_vector needs 1.4.307 or newer). "
-                        "The plain decode path, which is the product, is what runs; on AMD and Intel nothing is "
-                        "missing, since the extension is NVIDIA's alone")
+                        "The viewer still builds and runs: it decodes with its standard shader, which is the default on "
+                        "every GPU; the extension only makes the decode faster on recent NVIDIA cards, so on AMD and "
+                        "Intel nothing is missing. For that faster path on an NVIDIA "
+                        "card under Linux, build against newer headers: the LunarG SDK (source its setup-env.sh "
+                        "before cmake), or a distribution whose vulkan-headers package is 1.4.307 or newer "
+                        "(Fedora 42, Arch, Debian 13)")
     else()
         message(STATUS "nntc_view_vk: Vulkan headers 1.x.${NNTC_VK_HEADER_VERSION} in ${Vulkan_INCLUDE_DIR} - "
                        "cooperative vectors are compiled IN; whether they RUN is still the device's own query")

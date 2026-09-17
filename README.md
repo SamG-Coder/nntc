@@ -56,8 +56,10 @@ both viewers and `bc_check`, on Linux the Vulkan viewer (the Direct3D viewer and
 so an Arm laptop or an AMD or Intel box can build and run the viewer on assets encoded elsewhere (the `examples/`
 directory ships several; `build/nntc_view_vk examples/pavingstones141_1k_c0_4_nntc.json` opens one). The release gate needs the encoder and does not run on such a machine.
 
-Windows, the toolchain this tree is developed on -- **Visual Studio 2026 with CUDA 13.4** (CMake 4.2 or
-newer; the CMake bundled with VS 2026 is fine):
+### Windows
+
+The toolchain this tree is developed on is **Visual Studio 2026 with CUDA 13.4** (CMake 4.2 or newer; the CMake
+bundled with VS 2026 is fine):
 
 ```
 cmake -B build -S . -G "Visual Studio 18 2026" -T cuda=13.4
@@ -80,12 +82,30 @@ cmake -B build -S . -G "Visual Studio 17 2022" -T cuda=13.1
 cmake --build build --config Release
 ```
 
-Linux (Release is the default when no build type is named; `-DCMAKE_BUILD_TYPE=Debug` asks for Debug):
+### Linux
+
+Install the packages first (the Debian / Ubuntu line; the table below has the other families), then build. Release
+is the default when no build type is named; `-DCMAKE_BUILD_TYPE=Debug` asks for Debug:
 
 ```
+sudo apt install -y build-essential cmake pkg-config libvulkan-dev libshaderc-dev libglfw3-dev mesa-vulkan-drivers vulkan-tools
 cmake -B build -S .
 cmake --build build -j
 ```
+
+A full configure prints no warning. Anything the configure has to leave out is a **CMake Warning** that names the
+package to install; the ones a Linux box can meet:
+
+| the warning says | what is missing | install (Debian / Ubuntu) |
+| --- | --- | --- |
+| `No CUDA compiler was found: the encoder nntc_encode is skipped` | the CUDA toolkit; expected on any box without an NVIDIA card | nothing, unless you want the encoder: NVIDIA's `cuda-toolkit-13-x`, then `cmake -UCMAKE_CUDA_COMPILER` |
+| `Vulkan was not found: the target nntc_view_vk is skipped` | the Vulkan loader's headers and library | `libvulkan-dev` |
+| `No shaderc was found ...: nntc_view_vk is skipped` | the run-time GLSL compiler's library and header | `libshaderc-dev` |
+| `GLFW was not found: nntc_view_vk builds HEADLESS` | the window library; only `--shot` runs without it | `libglfw3-dev` |
+| `cooperative vectors are compiled OUT` | Vulkan headers older than 1.4.307; expected on every current distribution, and nothing is missing on AMD or Intel | nothing; for NVIDIA under Linux, the LunarG SDK's headers |
+
+After installing, run `cmake -B build -S .` again: the probes re-run on their own (only the CUDA miss is cached, hence
+its `-U`).
 
 That produces `nntc_encode`, and `nntc_view_vk` wherever `find_package(Vulkan)` finds a loader and a shaderc --
 with a GLFW window when GLFW is found (native X11 or Wayland with a GLFW 3.4, X11 through Xwayland with the 3.3 of Ubuntu and Debian 12) and headless when it is not, since its `--shot` needs no window, no surface
