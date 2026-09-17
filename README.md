@@ -320,6 +320,17 @@ interchangeable on every GPU.
 | trilinear / bilinear / point | the reference | the same mips and the same picture as A (measured byte-identical on an integrated Radeon and within rounding on an RTX 5090) |
 | anisotropic | the better picture: the bias moves the LOD and leaves the line the anisotropic taps are spread along at its true length | somewhat blurrier on oblique surfaces: scaling both gradients also makes that tap line 4 times longer. Measured against a 16x-supersampled reference on close, steeply angled views, A was ahead by 3 to 7 dB on both an RTX 5090 and an integrated Radeon; square-on, or with anisotropy off, there is no difference |
 
+**How much anisotropy level 1 gets under B is up to the driver.** Level 0 is a plain sample and always gets the
+hardware's full anisotropic filter. Level 1, read through explicit gradients, has been seen to behave two ways. On
+NVIDIA and AMD it is filtered anisotropically with the tap line 4 times too long (the row above), and on Intel
+integrated graphics (a 13th-generation Core i7) toggling anisotropy visibly changes level 1 as well, so it is
+filtered anisotropically there too (seen by eye, not measured against a reference). On Mesa's lavapipe, the CPU
+Vulkan driver, explicit-gradient samples get no anisotropy at all, only trilinear filtering, so toggling anisotropy
+changes level 0 and leaves level 1 byte-identical (the specification allows this, and some mobile GPUs may do the
+same). None of these is a wrong picture. Level 1 is the
+smooth, slowly varying latent, so what it loses at grazing angles costs little, and method A is the one that gives
+it the full anisotropic filter.
+
 **A refinement of B, documented and not shipped.** B's extra blur under anisotropic filtering comes from scaling
 both gradients. Scaling only the footprint's SHORT axis by 4 raises the LOD by the same 2 levels and leaves the line
 the anisotropic taps are spread along at its true length. `ddx(uv)` and `ddy(uv)` are not that ellipse's axes, so
