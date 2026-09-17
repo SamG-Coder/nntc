@@ -150,7 +150,7 @@ first and last entries, so both kinds decode from the same two arrays.
 | `decode.width`, `decode.height` | required | the base level's decoded extent: the padded size when there was padding, the source size otherwise |
 | `decode.textures_out` | required | `T`, the material's texture count, 1 to 6; the decoder has `nout = 3T` outputs and texture `t` takes outputs `3t..3t+2` as RGB |
 | `block` | required | the resolution ratio between the levels, always 4 |
-| `lod_bias_level1` | required | `log2(block)` = 2, the `MipLODBias` level 1's sampler must carry (section 5) |
+| `lod_bias_level1` | required | `log2(block)` = 2: the number of mip levels level 1 is shifted by, which a consumer applies by scaling level 1's UV gradients by `2^lod_bias_level1` (section 5) |
 | `sampling` | informational | sections 5 and 6 in prose |
 | `textures` | required | exactly two entries, level 0 then level 1 |
 | `decoder` | required | the one affine layer |
@@ -269,13 +269,35 @@ each texture's mip from that texture's own texel density, and level 1 has `1/blo
 sits `log2(block)` below level 0's: when level 0 is at mip 1, level 1 is still at mip 0, a plane that was fitted beside
 level 0's mip 0. So:
 
-> **Level 1's sampler must carry `MipLODBias = lod_bias_level1` (= 2).**
+> **Level 1 must be sampled with both UV gradients scaled by `2^lod_bias_level1` (= 4)**, i.e. through `SampleGrad` /
+> `textureGrad` with `ddx(uv) * 4` and `ddy(uv) * 4`.
 
-With the bias its LOD equals level 0's at every distance; at 1:1 on screen it goes from -2 to 0, still mip 0, so
-nothing changes at the base. Without it the base is right and everything from mip 1 down is decoded from the wrong
-colour plane, which looks like splotching at level-1 texel scale. No shader arithmetic is involved: it is one
-sampler-state field. `nntc_view` sets it by default and key `L` turns it off, which is the quickest way to see what it
-is for.
+Scaling both gradients by `s` raises the LOD the hardware computes by exactly `log2(s)` BEFORE any clamp, so level 1's
+LOD equals level 0's at every distance; at 1:1 on screen it goes from -2 to 0, still mip 0, so nothing changes at the
+base. It is still one ordinary hardware sample, and anisotropic filtering still runs, at a cost: an anisotropic
+filter takes its LOD from the footprint's short axis and the line its taps are spread along from the long axis, and
+scaling BOTH gradients lengthens that line by the same factor, where a LOD bias would move the LOD alone. On an
+oblique surface with anisotropy on, level 1 is therefore blurred along the long axis somewhat more than under a
+bias (3 to 7 dB against a supersampled reference on close, steep views; nothing square-on or with anisotropy off). Without the shift the base is right and everything from mip 1 down is decoded from
+the wrong colour plane, which looks like splotching at level-1 texel scale.
+
+**A change of method (2026-09-17, v1.1.21).** Earlier versions of both viewers, and of this guidance, applied the
+shift as a sampler LOD bias of +2 on the second (quarter-resolution) latent. That was switched to scaled gradients
+because of mipmap LOD calculation differences between Intel parts and AMD / NVIDIA ones: on Intel integrated graphics
+(observed on a 13th-generation Core i7 under both Direct3D 11 and Vulkan) the +2 bias made the second latent, and so
+the decoded picture, very blurry whenever the texture was magnified, while on AMD and NVIDIA it was correct. Scaled
+gradients pick the right mip on all three. With trilinear filtering they draw the same picture as the bias on AMD
+and NVIDIA; under anisotropic filtering the bias is the sharper of the two there (the README's "The two ways to apply
+the level-1 mip shift" sets them side by side). Nothing in the files changed:
+`lod_bias_level1` in the descriptor is the same number, applied a different way.
+
+A sampler LOD bias of the same value (`MipLODBias` / `mipLodBias` = `lod_bias_level1`) is the same operation on
+hardware that keeps a negative base LOD under magnification, which is what NVIDIA and AMD parts do; it was observed to
+blur a magnified picture badly on Intel Xe integrated graphics, where the base LOD appears to be floored near 0 before
+the bias is added (Intel's PRM documents bias-then-clamp and leaves the base LOD computation
+implementation-dependent), so **the gradient form is the one to ship when one code path has to be right on every
+GPU**; a consumer that knows it is on NVIDIA or AMD may use the bias, which is cheaper and sharper under anisotropy. `nntc_view` and `nntc_view_vk` both use it,
+and key `L` turns it off, which is the quickest way to see what it is for.
 
 Both textures are otherwise sampled with the same filter and the same addressing. A trilinear filter is fine and needs
 nothing else, and so is an anisotropic one: anisotropy is several trilinear samples along the footprint's long axis,

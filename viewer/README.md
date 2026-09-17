@@ -50,11 +50,11 @@ Arrows move, `W`/`S` zoom, `A`/`D` yaw, `Q`/`E` pitch, `Shift` slow, `C` cube/qu
 `X` anisotropic filtering on/off (on by default, `MaxAnisotropy` 8; it applies in TRILINEAR mode only, and in the other two the
 overlay says the flag is remembered and idle),
 `M` mips on/off (a second sampler set with MaxLOD = 0, so the hardware reads mip 0 of both textures; nothing is reloaded),
-`L` level 1's LOD bias on/off (on by default, see below),
+`L` level 1's LOD shift on/off (on by default, see below),
 `N` next output texture of the material, cycling through all of them - up to SIX, which is what the shader's `W[108]`,
 `bias[5]` and `outv[18]` carry and what `viewer/main.cpp` checks the decoder's shape against (`nout <= 18`),
 `1` show level 0's texture as stored, `2` show level 1's, `4` level 0 from the BC4 / BC5 pack made
-at load - which exists only when the file's level 0 is UNCOMPRESSED, and does nothing for the block-compressed default (below), `R` reload the shader, `Space` reset, `Esc` quit. Keys `3` and `5`-`8` set the shader's spare debug constants and do
+at load - which exists only when the file's level 0 is UNCOMPRESSED, and does nothing for the block-compressed default (below), `R` reload the shader, `Space` reset, `Esc` quit. Keys `5`-`8` set the shader's spare debug constants and do
 nothing in the shader as it ships.
 
 `--shot FILE.bmp` renders one frame and exits. Its state comes from `--cube`, `--z`, `--yaw`, `--pitch`, `--tex`, `--raw0`,
@@ -68,19 +68,22 @@ shot five times and asserts the five are the same bytes before it compares any t
 
 Anisotropy costs the representation nothing: it is several trilinear samples along the footprint's long axis, the dequantisation
 is affine and the decoder is affine in the samples, so a blend of latent samples decodes to the blend of the decodes - the same
-argument that makes trilinear filtering free (`../docs/DESIGN.md`, section 5). Every sampler set carries an anisotropic variant,
-so level 1's LOD bias and the mips toggle keep working under it.
+argument that makes trilinear filtering free (`../docs/DESIGN.md`, section 5). The sampler set carries an anisotropic variant,
+so the mips toggle keeps working under it (level 1's LOD shift is in the shader's gradients and needs no sampler).
 
 The window is sized from `GetClientRect` after it is created, so the swap chain is the size the window actually got - Windows
 clamps a 2560x1440 request to the work area - and a later `WM_SIZE` carrying that same size changes nothing. The first frame is
 therefore the steady one and, with `--shot`'s keyboard reads gone as well (above), `--shot` writes the same bytes on every launch
 and the release gate compares two assets' frames with no warm-up run.
 
-Sampling: one standard mipmapped `Sample()` call per texture -- two, or three when level 0 is in two files. Level 1's sampler carries `MipLODBias = log2(block)` (+2 at
-block 4): level 1 has a quarter of the texels per axis, so the GPU's own LOD for it sits two mips finer than level 0's, while the encoder
-fitted output mip m from mip m of BOTH latents (the 1:1 rule). The bias lines the two up with no shader math; at 1:1 on screen level 1 is
-still at its mip 0. With `L` off (the plain samplers) the base is right but from mip 1 down the colour latent is the wrong plane and the
-result goes splotchy.
+Sampling: one standard mipmapped call per texture -- two, or three when level 0 is in two files. Level 1's is a `SampleGrad` whose two UV
+derivatives are both multiplied by `2^lod_bias_level1` (4 at block 4), which raises the LOD the hardware computes by exactly `log2(block)`
+before any clamp: level 1 has a quarter of the texels per axis, so the GPU's own LOD for it sits two mips finer than level 0's, while the
+encoder fitted output mip m from mip m of BOTH latents (the 1:1 rule). Scaling both gradients lines the two up, and it is still one ordinary hardware sample (under anisotropic filtering it is a little blurrier on oblique surfaces than a sampler bias would be, because the longer gradients also lengthen the line the anisotropic taps are spread along: the root README's "The two ways to apply the level-1 mip shift"); at 1:1 on screen level 1 is still at its
+mip 0. With `L` off (the gradients unscaled) the base is right but from mip 1 down the colour latent is the wrong plane and the result goes
+splotchy. **No sampler here carries a `MipLODBias`.** Until v1.1.21 one did: level 1 was sampled through a sampler with a LOD bias of +2, and that was switched to scaled gradients because of mipmap LOD calculation differences on Intel parts against AMD and NVIDIA ones (the root README has the note). A sampler LOD bias of the same value is equivalent on hardware that keeps a negative base LOD under magnification (NVIDIA, AMD), but was observed to blur a magnified picture badly on Intel Xe integrated graphics, so the gradient form is the one to ship -- a 13th-gen Core i7 Intel Xe part
+rendered the magnified quad VERY blurry with the biased sampler and sharp without it, in this viewer and in the Vulkan one alike, which is
+what the gradient form fixes.
 
 The overlay is four lines and the debug strip `--nooverlay` leaves off:
 
@@ -94,7 +97,7 @@ The overlay is four lines and the debug strip `--nooverlay` leaves off:
    base figure, which is the number the file layout decides: 4 bpp for one BC4, 8 for one BC5, 12 for a BC5 and a BC4, 16 for two
    BC5s, divided by the texture count. It follows key `4` and is independent of the file's own byte size;
 2. **the state**: quad or cube, the filter, the anisotropy (and whether it is idle, which it is outside trilinear), mips on or off,
-   level 1's LOD bias on or off, which texture of the material is shown, whether the decode or a raw latent is shown, and the
+   level 1's LOD shift on or off, which texture of the material is shown, whether the decode or a raw latent is shown, and the
    renormalise flag;
 3. **the camera**: x, y, z, yaw, pitch;
 4. **the keys**, as a reminder line.

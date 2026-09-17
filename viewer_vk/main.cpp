@@ -1,15 +1,15 @@
 // nntc_view_vk: the asset on a real Vulkan sampler. STAGE 3 of docs/VULKAN_VIEWER_PLAN.md - parity with the Direct3D
 // 11 viewer. It reads the descriptor and the .dds files it names, uploads every level of every one of them, builds the
-// sixteen samplers, compiles bin/view.vert and bin/view.frag at runtime and draws the decoded material; and it has
+// eight samplers, compiles bin/view.vert and bin/view.frag at runtime and draws the decoded material; and it has
 // every key that viewer has with the same letters and the same meaning, its four-line overlay, its load-time BC4 / BC5
 // pack of an uncompressed level 0 (key 4, through the same shared/bc_pack.h), and every one of its flags.
 //
 // Usage: nntc_view_vk <PREFIX_nntc.json> [flags]
 // Controls: arrows move, W/S zoom, A/D yaw, Q/E pitch, Shift slow, C cube/quad, P/B/T point/bilinear/trilinear,
 //           X anisotropy on / off (trilinear only), N next output texture, M mips on / off (the sampler's maxLod 0),
-//           L level 1's LOD bias on / off, V renormalise the shown triple as a tangent-space normal, 1 show level 0's
-//           texture as stored, 2 show level 1's, 4 level 0 from the BC4 / BC5 pack made at load, R reload both
-//           shaders from disk, Space reset, Esc quit.
+//           L level 1's LOD shift on / off (the 1:1 mip rule, carried by the gradients), V renormalise the shown
+//           triple as a tangent-space normal, 1 show level 0's texture as stored, 2 show level 1's, 4 level 0 from
+//           the BC4 / BC5 pack made at load, R reload both shaders from disk, Space reset, Esc quit.
 //
 // The program this one is a sibling of is viewer/main.cpp, the Direct3D 11 viewer, and the reason a second viewer
 // exists at all is that the format's claim is about THE hardware sampling operator rather than one vendor's: a second
@@ -203,7 +203,6 @@ static VkFence          g_frame_fence = VK_NULL_HANDLE;
 // What the chosen device can do, read once at device creation and acted on rather than assumed.
 static bool  g_has_bc = false;          // textureCompressionBC: without it a BC4 / BC5 asset is refused by name
 static bool  g_has_aniso = false;       // samplerAnisotropy: without it key X's state is permanently off
-static float g_max_lod_bias = 0.0f;     // maxSamplerLodBias, which a level-1 bias is checked against
 static float g_timestamp_period = 0.0f; // nanoseconds a timestamp tick is worth, which --bench turns ticks into
 static uint32_t g_timestamp_bits = 0;   // the queue family's valid timestamp bits; 0 means it cannot be measured here
 
@@ -572,7 +571,6 @@ static void pick_physical_device(int want) {
     printf("drawing on device %d: %s (%s, Vulkan %u.%u), queue family %u\n", chosen, p.deviceName,
            device_kind(p.deviceType), VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion),
            g_queue_family);
-    g_max_lod_bias = p.limits.maxSamplerLodBias;
     // What --bench needs, read here because both halves of it belong to the chosen device and its queue family: the
     // nanoseconds a tick is worth, and how many bits of the counter are meaningful. A family may report zero, which
     // means the queue cannot be timed at all and --bench says so rather than printing a number made of nothing.
@@ -1272,13 +1270,13 @@ struct State {
     bool  cube = false;
     int   filter_mode = 2;   // 0 point, 1 bilinear, 2 trilinear (the default, as in the other viewer)
     bool  aniso = true;      // key X: anisotropy, which applies in TRILINEAR mode only
-    bool  lod_bias = true;   // key L: level 1 sampled with MipLODBias = log2(block)
+    bool  lod_bias = true;   // key L: level 1's UV gradients scaled by 2^lod_bias_level1 (the encoder's 1:1 mip rule)
     bool  mips_on = true;    // key M: false = the sampler's maxLod is 0, so every fetch reads mip 0
     Latent lat[2];
     Uniforms cb{};
     int   textures_out = 1, tex_shown = 0;
     int   src_w = 0, src_h = 0, block = 4;
-    float lod_bias_level1 = 2.0f;
+    float lod_bias_level1 = 2.0f;   // the descriptor's own value: the mip levels level 1 is shifted by, so the gradient scale is 2^this
     std::string terms;
     bool  debug_dirty = true;   // the overlay's text is rebuilt and re-uploaded only when something it says has changed
 };
@@ -1304,12 +1302,12 @@ static const char* filter_name(int m) { return m == 0 ? "POINT" : (m == 2 ? "TRI
 // bilinear the flag is remembered and does nothing, which is what the other viewer's overlay says.
 static int filter_slot(void) { return (g.filter_mode == 2 && g.aniso) ? 3 : g.filter_mode; }
 
-// The sixteen samplers of the plan's section 1.10: [mips on / off][point, bilinear, trilinear, anisotropic], twice,
-// the second set carrying level 1's LOD bias.
+// The eight samplers of the plan's section 1.10: [mips on / off][point, bilinear, trilinear, anisotropic]. There used
+// to be sixteen, a second set carrying level 1's mipLodBias; level 1's LOD shift is in the gradients now (const0.z),
+// so BOTH levels sample through this one table and no sampler here carries a bias at all.
 static VkSampler g_samplers[2][FILTER_STATES] = {};
-static VkSampler g_samplers1[2][FILTER_STATES] = {};
 
-static VkSampler make_sampler(int filter, bool mips, float bias) {
+static VkSampler make_sampler(int filter, bool mips) {
     VkSamplerCreateInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     si.magFilter = filter == 0 ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
@@ -1317,7 +1315,7 @@ static VkSampler make_sampler(int filter, bool mips, float bias) {
     si.mipmapMode = filter >= 2 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
     // CLAMP throughout, because the encoder fits the taps clamped at the edges.
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    si.mipLodBias = bias;
+    si.mipLodBias = 0.0f;   // no sampler in this viewer carries a LOD bias; see create_samplers
     si.anisotropyEnable = (filter == 3 && g_has_aniso) ? VK_TRUE : VK_FALSE;
     si.maxAnisotropy = si.anisotropyEnable ? ANISO_MAX : 1.0f;
     si.compareEnable = VK_FALSE;
@@ -1333,31 +1331,36 @@ static VkSampler make_sampler(int filter, bool mips, float bias) {
     return s;
 }
 
-// Level 1's sampler set carries MipLODBias = log2(block), so the hardware picks level 1's mip as the encoder's 1:1
-// rule does (output mip m reads mip m of both latents). Level 1 has a quarter of the texels per axis, so its natural
-// LOD is 2 below level 0's and the bias of +2 lines them up. The bias is part of the format's contract
-// (docs/FORMAT.md section 5), so it is read from the descriptor rather than assumed.
+// The encoder's 1:1 mip rule on the GPU: output mip m reads mip m of BOTH latents. Level 1 has a quarter of the texels
+// per axis, so its natural LOD is log2(block) = 2 below level 0's, and the descriptor's lod_bias_level1 is how many
+// mips it must be shifted up by. That shift is applied IN THE GRADIENTS - view.frag's textureGrad multiplies both UV
+// derivatives by 2^lod_bias_level1, which raises the LOD the hardware computes by exactly that many mips before any
+// clamp - and NOT as a sampler mipLodBias, which is the other viewer's choice too and for the same reason: a sampler
+// bias is equivalent only where the hardware keeps a properly negative base LOD under magnification, and on an Intel
+// Xe integrated GPU it does not (base floored near 0, plus 2, mip 2, a badly blurred magnified picture, in this
+// viewer and in the Direct3D one alike). Intel's PRM documents bias-then-clamp with an implementation-dependent base.
 //
-// A mipLodBias outside [-maxSamplerLodBias, +maxSamplerLodBias] is OUT OF SPEC, not clamped: the valid-usage rule on
-// VkSamplerCreateInfo says the absolute value must not exceed the limit, and a sampler created past it draws eight
-// validation errors and then whatever the driver felt like. The guaranteed floor on that limit is exactly 2, which is
-// the value this format uses at block 4, so a future asset at a larger block on a bare-minimum device would land
-// there. So it is refused before a single sampler exists - the value and the limit both named - rather than created
-// and hoped over, which is the refusal the Direct3D viewer's own bias would make. The check is on the MAGNITUDE
-// because the limit is two-sided and a hand-authored descriptor may carry either sign.
-static void create_samplers(float bias) {
-    if (std::fabs(bias) > g_max_lod_bias) {
-        fprintf(stderr, "ERROR: the descriptor's lod_bias_level1 is %g and this device's maxSamplerLodBias is %g, so "
-                        "level 1's sampler cannot carry the format's bias on this GPU\n",
-                (double)bias, (double)g_max_lod_bias);
-        exit(1);
+// The value is part of the format's contract (docs/FORMAT.md section 5), so it is read from the descriptor rather
+// than assumed - and a number outside the range the shift can mean is refused by name, before a sampler exists,
+// rather than turned into a gradient scale of 2^1000. (The refusal this replaces was
+// against maxSamplerLodBias, which no longer constrains anything here: no sampler carries a bias.)
+static const float LOD_BIAS_LEVEL1_MAX = 8.0f;   // a block of 256: far past anything the format writes, and still a finite scale
+static bool check_level1_lod_shift(float bias) {
+    if (!(bias >= 0.0f && bias <= LOD_BIAS_LEVEL1_MAX)) {
+        fprintf(stderr, "ERROR: the descriptor's lod_bias_level1 is %g, which is outside [0, %g]: it is the number of mip\n"
+                        "       levels level 1 is shifted by, so it cannot be negative and cannot be that large\n",
+                (double)bias, (double)LOD_BIAS_LEVEL1_MAX);
+        return false;
     }
-    for (int mips = 0; mips < 2; mips++) for (int f = 0; f < FILTER_STATES; f++) {
-        g_samplers[mips][f] = make_sampler(f, mips != 0, 0.0f);
-        g_samplers1[mips][f] = make_sampler(f, mips != 0, bias);
-    }
-    printf("  level 1 sampler: mipLodBias +%.0f (the JSON's lod_bias_level1, log2 of block %d): the 1:1 mip rule\n",
-           (double)bias, g.block);
+    printf("  level 1 LOD: UV gradients scaled by %g (2^lod_bias_level1, lod_bias_level1 = %g%s); key L toggles it\n",
+           (double)std::exp2(bias), (double)bias,
+           bias == std::log2((float)g.block) ? ", log2 of the block" : ", NOT log2 of the block");
+    return true;
+}
+
+static void create_samplers(void) {
+    for (int mips = 0; mips < 2; mips++) for (int f = 0; f < FILTER_STATES; f++)
+        g_samplers[mips][f] = make_sampler(f, mips != 0);
 }
 
 static VkFormat vk_format_for_dxgi(int dxgi) {
@@ -1790,12 +1793,21 @@ static bool load_asset(const std::string& json_path) {
             else if (!bc_pack_level0(L)) fprintf(stderr, "WARNING: level 0 was not packed at load; key 4 has nothing to bind\n");
             L.raw.clear(); L.raw.shrink_to_fit();
         }
-        // Level 1's LOD-biased samplers. The bias is the JSON's own lod_bias_level1, which is what the format says the
-        // sampler must carry; log2(block) is only the value the writer puts there, and a file that ever said something
-        // else would mean it.
+        // Level 1's LOD shift and the one sampler table. The value is the JSON's own lod_bias_level1, which is what the
+        // format says the level-1 sample must carry; log2(block) is only the value the writer puts there, and a file
+        // that ever said something else would mean it.
         if (l == 1) {
-            g.lod_bias_level1 = (float)root.number("lod_bias_level1", g.block > 1 ? 2.0 : 0.0);
-            create_samplers(g.lod_bias_level1);
+            // Absent means log2(block), which is what every writer puts there. Present and not a number is refused, as
+            // an out-of-range number is: it used to fall back to the default in silence.
+            const JVal* lbv = root.get("lod_bias_level1");
+            if (lbv && lbv->kind != JVal::NUM) {
+                fprintf(stderr, "ERROR: the descriptor's lod_bias_level1 is not a number\n");
+                return false;
+            }
+            const float lb = lbv ? (float)lbv->num : std::log2((float)(g.block > 1 ? g.block : 1));
+            if (!check_level1_lod_shift(lb)) return false;
+            g.lod_bias_level1 = lb;
+            create_samplers();
         }
         const JVal* dq = t.get("dequantise"); const JVal* lo = dq ? dq->get("lo") : nullptr; const JVal* hi = dq ? dq->get("hi") : nullptr;
         if (!lo || !hi || lo->kind != JVal::ARR || hi->kind != JVal::ARR || (int)lo->arr.size() < L.C || (int)hi->arr.size() < L.C) { fprintf(stderr, "ERROR: level %d: no lo / hi per channel\n", l); return false; }
@@ -1922,7 +1934,8 @@ static void update_descriptors(void) {
     };
     const int slot = filter_slot();
     const int mips = g.mips_on ? 1 : 0;
-    const VkSampler samplers[2] = { g_samplers[mips][slot], (g.lod_bias ? g_samplers1 : g_samplers)[mips][slot] };
+    // s0 level 0, s1 level 1: the SAME state. Level 1's LOD shift is const0.z, the gradient scale, not a sampler bias.
+    const VkSampler samplers[2] = { g_samplers[mips][slot], g_samplers[mips][slot] };
 
     VkDescriptorBufferInfo bi{};
     bi.buffer = g_uniform_buffer; bi.offset = 0; bi.range = sizeof(Uniforms);
@@ -2252,7 +2265,7 @@ static void init_overlay(void) {
     VK_CHECK(vkMapMemory(g_device, g_overlay_staging_memory, 0, (VkDeviceSize)OVL_W * OVL_H * 4, 0, &g_overlay_mapped));
 
     // A point sampler with no mips: the strip is drawn at its own size and a filtered fetch would only blur the glyphs.
-    // It is created here rather than taken from the scene's sixteen, because those carry the keys' state.
+    // It is created here rather than taken from the scene's eight, because those carry the keys' state.
     VkSamplerCreateInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     si.magFilter = si.minFilter = VK_FILTER_NEAREST;
@@ -2599,13 +2612,13 @@ static void update_debug_text(void) {
     else if (g.filter_mode == 2) snprintf(aniso_s, sizeof(aniso_s), "Aniso:%u", (unsigned)ANISO_MAX);
     else snprintf(aniso_s, sizeof(aniso_s), "Aniso:%u (trilinear only)", (unsigned)ANISO_MAX);
     const float* const0 = g.cb.scene.const0;
-    snprintf(l1, sizeof(l1), "Mode:%-4s Filter:%-9s %-24s Mips:%s L1bias:%s Tex:%d/%d  Show:%s  Renorm:%s",
+    snprintf(l1, sizeof(l1), "Mode:%-4s Filter:%-9s %-24s Mips:%s L1lod:%s Tex:%d/%d  Show:%s  Renorm:%s",
              g.cube ? "CUBE" : "QUAD", filter_name(g.filter_mode), aniso_s, g.mips_on ? "ON " : "OFF",
              g.lod_bias ? "ON " : "OFF", g.tex_shown, g.textures_out,
              const0[0] > 0.5f ? "LATENT0" : (const0[1] > 0.5f ? "LATENT1" : "DECODE"), const0[3] > 0.5f ? "ON " : "OFF");
     snprintf(l2, sizeof(l2), "X:%+5.1f Y:%+5.1f Z:%5.1f Yaw:%+6.1f Pitch:%+6.1f", (double)g.x, (double)g.y, (double)g.z,
              (double)g.yaw, (double)g.pitch);
-    const char* l3 = "Move:Arrows/WS Rot:ADQE C:cube B/T/P:filter X:aniso M:mips L:L1bias N:tex V:renorm 1/2:latents "
+    const char* l3 = "Move:Arrows/WS Rot:ADQE C:cube B/T/P:filter X:aniso M:mips L:L1lod N:tex V:renorm 1/2:latents "
                      "4:BC-pack R:reload Spc:reset Esc";
     const char* lines[4] = { l0, l1, l2, l3 };
     for (int li = 0; li < 4; li++) {
@@ -2741,6 +2754,11 @@ static void set_uniforms(VkExtent2D extent) {
     s.tex_size[0] = (float)g.lat[0].W; s.tex_size[1] = (float)g.lat[0].H;
     s.tex_size[2] = (float)g.lat[1].W; s.tex_size[3] = (float)g.lat[1].H;
     s.lod_info[0] = (float)(g.lat[0].mips - 1); s.lod_info[1] = (float)(g.lat[1].mips - 1);
+    // const0.z: the factor the shader multiplies level 1's UV derivatives by before its textureGrad.
+    // 2^lod_bias_level1 raises the hardware's LOD by lod_bias_level1 mips, which is the encoder's 1:1 rule; key L off
+    // leaves the gradients alone, which is the control. It is written here every frame, so no key and no reset can
+    // leave a zero scale in the slot - which would collapse every fetch to mip 0.
+    s.const0[2] = g.lod_bias ? std::exp2(g.lod_bias_level1) : 1.0f;
     g.cb.dec.sel[1] = g.tex_shown;
     // The textures level 0 is read from, decided from the SAME state update_descriptors binds from, so that the count
     // the shader is told and the textures it is given can never be one frame apart - which on a key-4 toggle of a
@@ -2906,7 +2924,7 @@ void app_key_struck(int key) {
         case 'T': g.filter_mode = 2; g.debug_dirty = true; printf("Filter: TRILINEAR\n"); break;
         case 'P': g.filter_mode = 0; g.debug_dirty = true; printf("Filter: POINT\n"); break;
         case 'X':
-            // A device without samplerAnisotropy has no anisotropic sampler to switch to - every one of the sixteen
+            // A device without samplerAnisotropy has no anisotropic sampler to switch to - every one of the eight
             // was created with anisotropyEnable false - so the key says so and changes nothing, rather than flipping a
             // flag the overlay would then report as an anisotropy that is not happening.
             if (!g_has_aniso) { printf("anisotropy unsupported on this device\n"); break; }
@@ -2917,8 +2935,8 @@ void app_key_struck(int key) {
             break;
         case 'L':
             g.lod_bias = !g.lod_bias; g.debug_dirty = true;
-            printf("Level 1 LOD bias: %s\n", g.lod_bias ? "ON (+log2(block): the 1:1 mip rule)"
-                                                        : "OFF (the GPU's own LOD: level 1 two mips finer than fitted)");
+            printf("Level 1 LOD shift: %s\n", g.lod_bias ? "ON (gradients scaled by 2^lod_bias_level1: the 1:1 mip rule)"
+                                                         : "OFF (the GPU's own LOD: level 1 two mips finer than fitted)");
             break;
         case 'M':
             g.mips_on = !g.mips_on; g.debug_dirty = true;
@@ -2939,7 +2957,6 @@ void app_key_struck(int key) {
             break;
         case '1': const0[0] = 1.0f - const0[0]; const0[1] = 0.0f; g.debug_dirty = true; break;
         case '2': const0[1] = 1.0f - const0[1]; const0[0] = 0.0f; g.debug_dirty = true; break;
-        case '3': const0[2] = 1.0f - const0[2]; g.debug_dirty = true; break;
         case 'V':
             const0[3] = 1.0f - const0[3]; g.debug_dirty = true;
             printf("Normal renormalisation: %s\n", const0[3] > 0.5f ? "ON (unpack, unit length, repack)" : "OFF");
@@ -3277,7 +3294,7 @@ static int render_window(const std::string& json_path, int device_index, const c
             return 1;
         }
 
-        // The frame's bindings are decided here, after the fence: keys P/B/T, X, M, L and 4 change which sampler and
+        // The frame's bindings are decided here, after the fence: keys P/B/T, X, M and 4 change which sampler and
         // which image the descriptors point at, and rewriting them with the device idle with respect to this
         // program's own work is what one frame in flight buys.
         update_descriptors();
@@ -3372,7 +3389,6 @@ static void destroy_everything(void) {
 
         for (int mips = 0; mips < 2; mips++) for (int f = 0; f < FILTER_STATES; f++) {
             if (g_samplers[mips][f]) { vkDestroySampler(g_device, g_samplers[mips][f], nullptr); g_samplers[mips][f] = VK_NULL_HANDLE; }
-            if (g_samplers1[mips][f]) { vkDestroySampler(g_device, g_samplers1[mips][f], nullptr); g_samplers1[mips][f] = VK_NULL_HANDLE; }
         }
         if (g_overlay_sampler) { vkDestroySampler(g_device, g_overlay_sampler, nullptr); g_overlay_sampler = VK_NULL_HANDLE; }
 
@@ -3440,8 +3456,9 @@ static void viewer_usage(const char* exe) {
     printf("  --yaw F          the camera yaw, in degrees\n");
     printf("  --pitch F        the camera pitch, in degrees\n");
     printf("  --nomips         the sampler's maxLod is 0, so every fetch reads mip 0 (the key M off)\n");
-    printf("  --nobias         level 1 without its mipLodBias of log2(block) (the key L off). The bias is what the\n");
-    printf("                   encoder's 1:1 rule becomes on the GPU, so this is the control and not a preference\n");
+    printf("  --nobias         level 1 without its LOD shift of log2(block) (the key L off), i.e. its UV gradients\n");
+    printf("                   unscaled. The shift is what the encoder's 1:1 rule becomes on the GPU, so this is the\n");
+    printf("                   control and not a preference\n");
     printf("  --noaniso        anisotropy off, which applies in the trilinear mode only (the key X off)\n");
     printf("  --renorm         renormalise the decoded triple as a tangent-space normal (the key V)\n");
     printf("  --raw0           show level 0's own channels instead of the decode (the key 1)\n");
@@ -3593,7 +3610,7 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    printf("start: mips %s, level 1 LOD bias %s, anisotropy %s, level 0 %s\n", g.mips_on ? "on" : "off",
+    printf("start: mips %s, level 1 LOD shift %s, anisotropy %s, level 0 %s\n", g.mips_on ? "on" : "off",
            g.lod_bias ? "on" : "off", g.aniso ? "on (trilinear only)" : "off",
            g_bc ? "the BC pack, if the file is uncompressed" : "as the file holds it");
     const int status = (g_shot || g_bench_frames > 0)

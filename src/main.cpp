@@ -1566,9 +1566,10 @@ static void print_banner(const Options& o, const Model& m, const DeviceInfo& inf
     printf("         and (c) run on every plane of every round, each plane on its own dimensions, its own site set and\n");
     printf("         its own source mip. With the decoder held, the planes share nothing and are independent problems;\n");
     printf("         the only coupling between levels is W itself, which block (a) fits over every site of every plane\n");
-    printf("         with the mip weights above. On the GPU the same rule is one sampler-state field: level 1 carries\n");
-    printf("         MipLODBias %d, without which the decoder is fed a colour plane %d mips too fine from mip 1 down.\n",
-           LOD_BIAS_LEVEL1, LOD_BIAS_LEVEL1);
+    printf("         with the mip weights above. On the GPU the same rule is a shift of level 1's LOD by %d mips - its UV\n", LOD_BIAS_LEVEL1);
+    printf("         gradients scaled by %d, or a sampler LOD bias of %d where the hardware handles one correctly (README.md) -\n",
+           1 << LOD_BIAS_LEVEL1, LOD_BIAS_LEVEL1);
+    printf("         without which the decoder is fed a colour plane %d mips too fine from mip 1 down.\n", LOD_BIAS_LEVEL1);
     fflush(stdout);
 }
 

@@ -1049,6 +1049,8 @@ departed from the plan above. The plan's sections 1 to 4 are left as they were w
 | `v1.1.14`, `v1.1.15` | Sane defaults from two reviews written as a Linux developer: Release when no build type is named, `install()` rules, `-Wall -Wextra` on the Linux target, no `glfwFocusWindow` (Wayland prints an error for it), the work-area clamp, honest GLFW 3.3 versus 3.4 text, per-vendor driver packages and an openSUSE row, the compiled-out cooperative-vector line naming NVIDIA so an AMD owner does not go looking for the SDK. The one thing declined: a too-old distribution CUDA still fails the configure, because this is a sample. |
 | `v1.1.16` | Anything the configure leaves out is a CMake WARNING, after an AMD box built the headless viewer without noticing. The window opens at 1280x720 (the 2560x1440 default was bigger than the desktop it opened on); the `--shot` frame stays 2560x1440 so the gate's comparisons are unchanged; the overlay scales to a narrower window. |
 | `v1.1.17`, `v1.1.18` | `DEBUG build` as a Debug build's first line. The decoder's index arithmetic as shifts and masks in both shaders, so fxc's two integer-division warnings are gone; frames byte-identical before and after. |
+| `v1.1.21-lod-gradients` | **Level 1's LOD shift moved out of the sampler and into the gradients.** The owner's 13th-gen Core i7 Intel Xe integrated GPU drew a VERY blurry magnified picture in BOTH viewers with level 1's sampler carrying `MipLODBias` / `mipLodBias` = `lod_bias_level1` = 2, and a sharp one with the bias off: the part evidently does not carry a properly negative base LOD under magnification, so a base floored near 0 plus 2 lands on mip 2. Intel's PRM documents bias-then-clamp and leaves the base LOD computation implementation-dependent, so this is allowed and not a driver bug to wait out. Both viewers now sample level 1 with `SampleGrad` / `textureGrad` and both UV derivatives multiplied by `2^lod_bias_level1` (`const0.z`, the constant buffer's documented spare; 1.0 with key `L` off), which raises the hardware's LOD by exactly that many mips BEFORE any clamp, leaves the ratio of the gradients alone so anisotropy is unaffected, and is still one ordinary hardware sample. No sampler in the tree carries a LOD bias any more, the sixteen samplers are eight, and risk 4's `maxSamplerLodBias` refusal is replaced by a range check on `lod_bias_level1` itself. On the RTX 5090 all 24 before-and-after frames are byte-identical; the Intel part is the owner's to re-test. |
+| `v1.1.23` | **A correction to the row above.** Two reviews of v1.1.21 swept distance and orientation, which the first check had not (it used two distances, both square-on). The gradient form equals the old bias only with trilinear filtering, square-on, or fully magnified. Under ANISOTROPIC filtering the two are not the same filter: a bias moves only the LOD, while scaling both gradients also lengthens the line the anisotropic taps are spread along, so on oblique surfaces with anisotropy on the gradient frames differ from the bias frames by up to about 100 of 255 on both the RTX 5090 and the Radeon, and against a 16x-supersampled reference the bias is ahead by 3 to 7 dB close in. The claim "the ratio is unchanged, so anisotropy is unaffected" was wrong and is removed from the documents and the shader comments. The owner's decision: ship what works everywhere (the gradients) and document both methods, the bias for NVIDIA and AMD and the gradients for Intel and the generic case, in the README. |
 
 ### What the plan got right
 
@@ -1096,6 +1098,12 @@ departed from the plan above. The plan's sections 1 to 4 are left as they were w
 5. Do not open windows on the owner's desktop without asking. The WSLg window tests were run from a second X
    client that sent keys, resizes and the close message, which is the right way to test a window, and the wrong
    thing to do while someone is typing.
+6. Two formulations that the specification makes equal are not equal on hardware. A sampler LOD bias and a scaled
+   texture-coordinate gradient are the same `log2` of the same number, and the Intel Xe part disagreed by two whole
+   mips, because the base LOD a magnified fetch starts from is implementation-dependent. Prefer the formulation
+   whose inputs the specification pins down -- gradients are the sampler's stated input, a bias is an adjustment to
+   something it computes -- and get it in front of an integrated GPU before calling it settled. Byte-identical
+   frames on one vendor prove the refactor, not the portability.
 
 ### Still open
 
@@ -1107,3 +1115,6 @@ departed from the plan above. The plan's sections 1 to 4 are left as they were w
   vector benchmark a fair one; today's 4 to 5 times is against an un-unrolled loop.
 * Vendoring the Khronos headers (the owner's OpenCL practice) would give Linux NVIDIA users the accelerated path
   without the LunarG SDK. Not done; the guard makes it optional.
+7. A verification has to vary what the change could depend on. "Byte-identical at two distances" was true and was
+   not evidence, because both distances were square-on and the difference lives at oblique angles under anisotropy.
+   Sweep the orientation as well as the distance, and say which filter states were covered.

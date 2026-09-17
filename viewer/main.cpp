@@ -11,17 +11,21 @@
 //        asset and on nothing else (see the Input section).
 // Controls: arrows move, W/S zoom, A/D yaw, Q/E pitch, Shift slow, C cube/quad, P/B/T point/bilinear/trilinear, X anisotropic filtering
 //           on / off (it applies in trilinear mode only), N next output texture
-//           (materials), M mips on / off (the sampler's MaxLOD 0: mip 0 only, nothing reloaded), L level 1's LOD bias on / off (see
-//           make_level1_samplers), V renormalise the shown triple as a tangent-space normal (unpack to [-1, 1], unit length, repack;
+//           (materials), M mips on / off (the sampler's MaxLOD 0: mip 0 only, nothing reloaded), L level 1's LOD shift on / off (the
+//           1:1 mip rule; see set_uniforms and const0.z), V renormalise the shown triple as a tangent-space normal (unpack to [-1, 1], unit length, repack;
 //           grey-ish pixels (no direction) and black-ish or z < 0 pixels (into the surface) are left alone; off by default), 1 show level 0's texture as stored, 2 show level 1's, 4 level 0 from its BC4 / BC5 pack (made at load;
 //           the default is what the file holds), R reload the shader, Space reset, Esc quit.
 // Anisotropy: D3D11_FILTER_ANISOTROPIC with MaxAnisotropy = ANISO_MAX, on by default in trilinear mode. It is several trilinear samples
 // along the footprint's long axis, and the decoder is affine in the samples, so a blend of latent samples decodes to the blend of the
 // decodes and nothing about the fit has to change - the same argument that makes trilinear filtering free (docs/DESIGN.md).
-// Sampling: two standard mipmapped Sample() calls, one per latent texture. Level 1's sampler carries MipLODBias = log2(block) so the
-// hardware reads mip m of BOTH latents for output mip m, the 1:1 rule the encoder fitted (without it the GPU reads level 1, a quarter
-// of the resolution, two mips finer than fitted: right at 1:1, splotchy colour from mip 1 down). The shader dequantises the samples
-// and applies the decoder. Nothing else special.
+// Sampling: two standard mipmapped calls, one per latent texture. Level 1's is a SampleGrad whose UV derivatives are both multiplied
+// by 2^lod_bias_level1 (const0.z), which raises the LOD the hardware computes by exactly log2(block) and so reads mip m of BOTH
+// latents for output mip m, the 1:1 rule the encoder fitted (without it the GPU reads level 1, a quarter of the resolution, two mips
+// finer than fitted: right at 1:1, splotchy colour from mip 1 down). NO SAMPLER HERE CARRIES A LOD BIAS. The same shift as a
+// sampler MipLODBias is equivalent only where the hardware keeps a properly negative base LOD under magnification: on an Intel Xe
+// integrated part (13th-gen Core i7, Windows 11) the biased sampler floored the base near 0, added 2, landed on mip 2 and blurred a
+// magnified picture badly, in this viewer and in the Vulkan one alike. The shader dequantises the samples and applies the decoder.
+// Nothing else special.
 //
 // Dependencies: the C runtime, Win32, D3D11, D3DCompiler.
 
@@ -100,13 +104,13 @@ static IDXGISwapChain*          g_swapchain = nullptr;
 static ID3D11RenderTargetView*  g_rtv = nullptr;
 static ID3D11Texture2D*         g_depth_tex = nullptr;
 static ID3D11DepthStencilView*  g_dsv = nullptr;
-// The sampler sets. [mips on / off][0=point, 1=bilinear, 2=trilinear, 3=anisotropic]: the MaxLOD = 0 row is key M (the
+// The sampler set. [mips on / off][0=point, 1=bilinear, 2=trilinear, 3=anisotropic]: the MaxLOD = 0 row is key M (the
 // hardware held at mip 0 of both textures, nothing reloaded), and slot 3 is the trilinear filter with anisotropy, which
-// key X turns on and off. Both sets carry all four, so the LOD bias and the mips toggle keep working under anisotropy.
+// key X turns on and off. There is ONE set, shared by both levels: level 1's LOD shift is a scale on its gradients and
+// not a sampler field, so it composes with every filter and with the mips toggle for free.
 static const int FILTER_STATES = 4;
 static const UINT ANISO_MAX = 8;   // the anisotropy asked for when it is on; one line to change
-static ID3D11SamplerState*      g_samplers1[2][FILTER_STATES] = {};  // level 1's samplers: the same with MipLODBias = log2(block) (key L: the 1:1 mip rule the encoder fitted)
-static ID3D11SamplerState*      g_samplers[2][FILTER_STATES] = {};   // level 0's
+static ID3D11SamplerState*      g_samplers[2][FILTER_STATES] = {};   // BOTH levels': level 1 is sampled through the same sampler and takes its LOD shift from the gradients instead (const0.z)
 static ID3D11RasterizerState*   g_raster = nullptr;
 static ID3D11DepthStencilState* g_depth_on = nullptr, * g_depth_off = nullptr;
 static ID3D11BlendState*        g_blend_alpha = nullptr;
@@ -115,19 +119,26 @@ static ID3D11Buffer*            g_dec_cbuffer = nullptr;   // the decoder consta
 static bool                     g_quit = false;
 static bool                     g_bc = false;   // the level-0 textures bound: false = the uncompressed .dds (the default), true = the BC4 / BC5 pack made at load (key 4; --bc starts packed)
 
-// Level 1's sampler set: the same three filters with MipLODBias = log2(block), so the hardware picks level 1's mip as the encoder's 1:1
-// rule does (output mip m reads mip m of both latents). Level 1 has a quarter of the texels per axis (block 4), so its natural LOD is 2 below
-// level 0's; the bias of +2 lines them up (at 1:1 on screen its LOD becomes 0, still mip 0; at level 0's mip 3 it reads its own mip 3).
-// The bias is part of the format's contract (docs/FORMAT.md section 5), so a sampler that could not be created is a
-// failure of the load and not something to render around: the caller stops.
-static bool make_level1_samplers(int block, float bias) {
-    for (int mips = 0; mips < 2; mips++) for (int f = 0; f < FILTER_STATES; f++) {
-        safe_release(g_samplers1[mips][f]);
-        if (!g_samplers[mips][f]) continue;
-        D3D11_SAMPLER_DESC sd{}; g_samplers[mips][f]->GetDesc(&sd); sd.MipLODBias = bias;
-        if (FAILED(g_dev->CreateSamplerState(&sd, &g_samplers1[mips][f]))) { fprintf(stderr, "ERROR: level 1's sampler state could not be created\n"); return false; }
+// The encoder's 1:1 mip rule on the GPU: output mip m reads mip m of BOTH latents. Level 1 has a quarter of the texels per axis
+// (block 4), so its natural LOD is log2(block) = 2 below level 0's, and the descriptor's lod_bias_level1 is how many mips it has to
+// be shifted up by. This viewer applies that shift IN THE GRADIENTS - the level-1 SampleGrad multiplies both UV derivatives by
+// 2^lod_bias_level1, which raises the hardware's computed LOD by exactly that many mips before any clamp - rather than as a sampler
+// MipLODBias, because a sampler bias is equivalent only where the hardware keeps a properly negative base LOD under magnification.
+// On an Intel Xe integrated GPU it does not: the biased sampler blurred a magnified picture badly (base floored near 0, plus 2, mip
+// 2, by inference from the symptom; Intel's PRM leaves the base LOD implementation-dependent). With trilinear filtering the
+// gradient form draws the same frames as the bias on NVIDIA and AMD; under anisotropic filtering it is a little blurrier at
+// oblique angles (README.md, "The two ways to apply the level-1 mip shift"). On the Intel part it is sharp, tested by hand.
+// The value is part of the format's contract (docs/FORMAT.md section 5) and is read from the descriptor rather than assumed, so a
+// number outside the range this shift can mean is refused by name instead of quietly scaling the gradients by 2^1000.
+static const float LOD_BIAS_LEVEL1_MAX = 8.0f;   // a block of 256: far past anything the format writes, and still a finite scale
+static bool check_level1_lod_shift(int block, float bias) {
+    if (!(bias >= 0.0f && bias <= LOD_BIAS_LEVEL1_MAX)) {
+        fprintf(stderr, "ERROR: the descriptor's lod_bias_level1 is %g, which is outside [0, %g]: it is the number of mip levels\n"
+                        "       level 1 is shifted by, so it cannot be negative and cannot be that large\n", (double)bias, (double)LOD_BIAS_LEVEL1_MAX);
+        return false;
     }
-    printf("  level 1 sampler: MipLODBias +%.0f (the JSON's lod_bias_level1, log2 of block %d): the 1:1 mip rule; key L toggles it\n", bias, block);
+    printf("  level 1 LOD: UV gradients scaled by %g (2^lod_bias_level1, lod_bias_level1 = %g%s); key L toggles it\n",
+           (double)std::exp2(bias), (double)bias, bias == std::log2((float)block) ? ", log2 of the block" : ", NOT log2 of the block");
     return true;
 }
 
@@ -165,7 +176,8 @@ struct State {
     bool  cube = false;
     int   filter_mode = 2;
     bool  aniso = true;      // key X: anisotropic filtering, which applies in TRILINEAR mode only (the point and bilinear states are what they say they are)
-    bool  lod_bias = true;   // key L: level 1 sampled with MipLODBias = log2(block) (the encoder's 1:1 rule); off = the plain sampler (the GPU reads level 1 two mips finer than fitted)
+    bool  lod_bias = true;   // key L: level 1's UV gradients scaled by 2^lod_bias_level1 (the encoder's 1:1 rule); off = the GPU's own LOD (it reads level 1 two mips finer than fitted)
+    float lod_bias_level1 = 2.0f;   // the descriptor's own value: the mip levels level 1 is shifted by, so the gradient scale is 2^this
     bool  mips_on = true;   // key M: false = the sampler's MaxLOD is 0, so every fetch reads mip 0 (the textures unchanged)
     ID3D11VertexShader*  vs = nullptr;
     ID3D11PixelShader*   ps = nullptr;
@@ -463,10 +475,18 @@ static bool load_asset(const std::string& json_path) {
             if (!bc_pack_level0(L)) fprintf(stderr, "WARNING: level 0 was not packed at load; key 4 has nothing to bind\n");
             L.raw.clear(); L.raw.shrink_to_fit();
         }
-        // Level 1's LOD-biased samplers (key L). The bias is the JSON's own lod_bias_level1, which is what the format
-        // says the sampler must carry; log2(block) is only the value the writer puts there, and a file that ever said
+        // Level 1's LOD shift (key L). The value is the JSON's own lod_bias_level1, which is what the format says the
+        // level-1 sample must carry; log2(block) is only the value the writer puts there, and a file that ever said
         // something else would mean it.
-        if (l == 1 && !make_level1_samplers(g.block, (float)root.number("lod_bias_level1", (double)g.block > 1 ? 2.0 : 0.0))) return false;
+        if (l == 1) {
+            // Absent means log2(block), which is what every writer puts there. Present and not a number is refused, as an
+            // out-of-range number is: it used to fall back to the default in silence, the one failure a hand edit can make.
+            const JVal* lbv = root.get("lod_bias_level1");
+            if (lbv && lbv->kind != JVal::NUM) { fprintf(stderr, "ERROR: the descriptor's lod_bias_level1 is not a number\n"); return false; }
+            const float lb = lbv ? (float)lbv->num : std::log2((float)(g.block > 1 ? g.block : 1));
+            if (!check_level1_lod_shift(g.block, lb)) return false;
+            g.lod_bias_level1 = lb;
+        }
         const JVal* dq = t.get("dequantise"); const JVal* lo = dq ? dq->get("lo") : nullptr; const JVal* hi = dq ? dq->get("hi") : nullptr;
         if (!lo || !hi || lo->kind != JVal::ARR || hi->kind != JVal::ARR || (int)lo->arr.size() < L.C || (int)hi->arr.size() < L.C) { fprintf(stderr, "ERROR: level %d: no lo / hi per channel\n", l); return false; }
         for (int c = 0; c < L.C; c++) { L.lo[c] = (float)lo->arr[c].num; L.hi[c] = (float)hi->arr[c].num; }
@@ -613,11 +633,11 @@ static void update_debug_text() {
     if (!g.aniso) snprintf(aniso_s, sizeof(aniso_s), "Aniso:OFF");
     else if (g.filter_mode == 2) snprintf(aniso_s, sizeof(aniso_s), "Aniso:%u", (unsigned)ANISO_MAX);
     else snprintf(aniso_s, sizeof(aniso_s), "Aniso:%u (trilinear only)", (unsigned)ANISO_MAX);
-    snprintf(l1,sizeof(l1),"Mode:%-4s Filter:%-9s %-24s Mips:%s L1bias:%s Tex:%d/%d  Show:%s  Renorm:%s",
+    snprintf(l1,sizeof(l1),"Mode:%-4s Filter:%-9s %-24s Mips:%s L1lod:%s Tex:%d/%d  Show:%s  Renorm:%s",
              g.cube?"CUBE":"QUAD", filter_name(g.filter_mode), aniso_s, g.mips_on?"ON ":"OFF", g.lod_bias?"ON ":"OFF", g.tex_shown, g.textures_out,
              g.const0[0]>0.5f?"LATENT0":(g.const0[1]>0.5f?"LATENT1":"DECODE"), g.const0[3]>0.5f?"ON ":"OFF");
     snprintf(l2,sizeof(l2),"X:%+5.1f Y:%+5.1f Z:%5.1f Yaw:%+6.1f Pitch:%+6.1f", g.x,g.y,g.z,g.yaw,g.pitch);
-    const char* l3 = "Move:Arrows/WS Rot:ADQE C:cube B/T/P:filter X:aniso M:mips L:L1bias N:tex V:renorm 1/2:latents 4:BC-pack R:reload Spc:reset Esc";
+    const char* l3 = "Move:Arrows/WS Rot:ADQE C:cube B/T/P:filter X:aniso M:mips L:L1lod N:tex V:renorm 1/2:latents 4:BC-pack R:reload Spc:reset Esc";
     const char* lines[4] = {l0,l1,l2,l3};
     for (int li=0; li<4; li++) { int y = 2 + li*LINE_ADV, x = 4; for (const char* p=lines[li]; *p; ++p) { blit_char(buf, x, y, *p); x += 8*FONT_SCALE; } }
     D3D11_MAPPED_SUBRESOURCE map{};
@@ -744,13 +764,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case 'T': g.filter_mode=2; g.debug_dirty=true; printf("Filter: TRILINEAR\n"); break;
                 case 'P': g.filter_mode=0; g.debug_dirty=true; printf("Filter: POINT\n"); break;
                 case 'X': g.aniso=!g.aniso; g.debug_dirty=true; printf("Anisotropic filtering: %s%s\n", g.aniso ? "ON (MaxAnisotropy " : "OFF", g.aniso ? (std::to_string((unsigned)ANISO_MAX) + ")").c_str() : ""); if (g.filter_mode != 2) printf("  (it applies in TRILINEAR mode only; press T)\n"); break;
-                case 'L': g.lod_bias=!g.lod_bias; g.debug_dirty=true; printf("Level 1 LOD bias: %s\n", g.lod_bias ? "ON (+log2(block): the 1:1 mip rule)" : "OFF (the GPU's own LOD: level 1 two mips finer than fitted)"); break;
+                case 'L': g.lod_bias=!g.lod_bias; g.debug_dirty=true; printf("Level 1 LOD shift: %s\n", g.lod_bias ? "ON (gradients scaled by 2^lod_bias_level1: the 1:1 mip rule)" : "OFF (the GPU's own LOD: level 1 two mips finer than fitted)"); break;
                 case 'M': g.mips_on=!g.mips_on; g.debug_dirty=true; printf("Mips: %s\n", g.mips_on ? "ON (MaxLOD unlimited)" : "OFF (sampler MaxLOD = 0: mip 0 only)"); break;
                 case 'C': g.cube=!g.cube; g.debug_dirty=true; break;
                 case 'N': g.tex_shown = (g.tex_shown + 1) % g.textures_out; g.debug_dirty=true; printf("Output texture %d of %d\n", g.tex_shown, g.textures_out); break;
                 case '1': g.const0[0]=1.0f-g.const0[0]; g.const0[1]=0; g.debug_dirty=true; break;
                 case '2': g.const0[1]=1.0f-g.const0[1]; g.const0[0]=0; g.debug_dirty=true; break;
-                case '3': g.const0[2]=1.0f-g.const0[2]; g.debug_dirty=true; break;
                 case 'V': g.const0[3]=1.0f-g.const0[3]; g.debug_dirty=true; printf("Normal renormalisation: %s\n", g.const0[3]>0.5f ? "ON (unpack, unit length, repack)" : "OFF"); break;
                 case '4': if (g.lat[0].bc_n) { g_bc = !g_bc; g.debug_dirty=true; printf("Level 0: %s\n", g_bc ? "BC4/BC5 pack" : "uncompressed"); } break;
                 case '5': g.const1[0]=1.0f-g.const1[0]; g.debug_dirty=true; break;
@@ -808,6 +827,11 @@ static void set_uniforms() {
     cb.lodInfo[0]=(float)(g.lat[0].mips-1); cb.lodInfo[1]=(float)(g.lat[1].mips-1);
     memcpy(cb.const0, g.const0, sizeof(cb.const0));
     memcpy(cb.const1, g.const1, sizeof(cb.const1));
+    // const0.z: the factor the shader multiplies level 1's UV derivatives by before its SampleGrad. 2^lod_bias_level1
+    // raises the hardware's LOD by lod_bias_level1 mips, which is the encoder's 1:1 rule; key L off leaves the
+    // gradients alone, which is the control. It is written here every frame rather than kept in g.const0, so no key
+    // and no reset can leave a zero scale in the slot.
+    cb.const0[2] = g.lod_bias ? std::exp2(g.lod_bias_level1) : 1.0f;
     D3D11_MAPPED_SUBRESOURCE map{};
     if (SUCCEEDED(g_ctx->Map(g_cbuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) { memcpy(map.pData, &cb, sizeof(cb)); g_ctx->Unmap(g_cbuffer, 0); }
     g.dec.sel[1] = g.tex_shown;
@@ -829,8 +853,9 @@ static void viewer_usage(const char* exe) {
     printf("  --yaw F          the camera yaw, in degrees\n");
     printf("  --pitch F        the camera pitch, in degrees\n");
     printf("  --nomips         the sampler's MaxLOD is 0, so every fetch reads mip 0 (the key M off)\n");
-    printf("  --nobias         level 1 without its MipLODBias of log2(block) (the key L off). The bias is what the\n");
-    printf("                   encoder's 1:1 rule becomes on the GPU, so this is the control and not a preference\n");
+    printf("  --nobias         level 1 without its LOD shift of log2(block) (the key L off), i.e. its UV gradients\n");
+    printf("                   unscaled. The shift is what the encoder's 1:1 rule becomes on the GPU, so this is the\n");
+    printf("                   control and not a preference\n");
     printf("  --noaniso        anisotropy off, which applies in the trilinear mode only (the key X off)\n");
     printf("  --renorm         renormalise the decoded triple as a tangent-space normal (the key V)\n");
     printf("  --raw0           show level 0's own channels instead of the decode (the key 1)\n");
@@ -909,7 +934,7 @@ int main(int argc, char** argv) {
     }
     // `level 0` here is what the VIEWER will bind, which for a file that is already block-compressed is the file's own
     // blocks and not a pack of this program's making; load_asset says which, once it has read the file.
-    printf("start: mips %s, level 1 LOD bias %s, anisotropy %s, level 0 %s\n", g.mips_on ? "on" : "off", g.lod_bias ? "on" : "off", g.aniso ? "on (trilinear only)" : "off", g_bc ? "the BC pack, if the file is uncompressed" : "as the file holds it");
+    printf("start: mips %s, level 1 LOD shift %s, anisotropy %s, level 0 %s\n", g.mips_on ? "on" : "off", g.lod_bias ? "on" : "off", g.aniso ? "on (trilinear only)" : "off", g_bc ? "the BC pack, if the file is uncompressed" : "as the file holds it");
 
     WNDCLASSEXA wc{}; wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW; wc.lpfnWndProc = wnd_proc; wc.hInstance = GetModuleHandleA(nullptr);
@@ -917,7 +942,10 @@ int main(int argc, char** argv) {
     RegisterClassExA(&wc);
     RECT r{0,0,WINDOW_WIDTH,WINDOW_HEIGHT};
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    HWND hwnd = CreateWindowA(wc.lpszClassName, "NNTC latent viewer (D3D11)", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
+    // Under --shot the window is created but never shown: the swap chain needs an HWND, and nothing needs it on the screen. It used to be
+    // WS_VISIBLE always, so every --shot - and the release gate runs dozens - flashed a 2560-wide window over the desktop of whoever was
+    // working there. The client rect, and so the frame, is the same either way: Windows clamps the size at creation, shown or not.
+    HWND hwnd = CreateWindowA(wc.lpszClassName, "NNTC latent viewer (D3D11)", WS_OVERLAPPEDWINDOW | (g_shot ? 0 : WS_VISIBLE), CW_USEDEFAULT, CW_USEDEFAULT,
                               r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
     if (!hwnd) { fprintf(stderr, "ERROR: window creation failed\n"); return 1; }
 
@@ -972,10 +1000,10 @@ int main(int argc, char** argv) {
         bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD; bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
         if (FAILED(g_dev->CreateBlendState(&bd, &g_blend_alpha))) { fprintf(stderr, "ERROR: the blend state could not be created\n"); return 1; }
         // Four sampler states (P/B/T and T with anisotropy), all CLAMP: the encoder fits the taps clamped at the edges.
-        // Every field is set: a zeroed D3D11_SAMPLER_DESC has ComparisonFunc 0, which is not a legal value, and
-        // MaxAnisotropy 0, which is not one either - the runtime accepts both because it ignores them for these
-        // filters, but make_level1_samplers reads the desc back with GetDesc and creates a sampler FROM it, so an
-        // illegal field would come back and be used.
+        // BOTH levels sample through these: none of them carries a MipLODBias, because level 1's LOD shift is in the
+        // gradients now. Every field is set anyway: a zeroed D3D11_SAMPLER_DESC has ComparisonFunc 0, which is not a
+        // legal value, and MaxAnisotropy 0, which is not one either, and a state created from an illegal field is a
+        // picture nobody can explain.
         D3D11_SAMPLER_DESC sd{};
         sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
         sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
@@ -1041,7 +1069,7 @@ int main(int argc, char** argv) {
                                               packed ? (g.lat[0].bc_n > 1 ? g.lat[0].bc_srv[1] : nullptr) : g.lat[0].srv_b };
         g.dec.sel[2] = packed ? g.lat[0].bc_n : (g.lat[0].srv_b ? 2 : 0);   // the textures level 0 is read from
         const int slot = filter_slot();   // key X: the trilinear state's anisotropic variant
-        ID3D11SamplerState* samps[2] = { g_samplers[g.mips_on ? 1 : 0][slot], (g.lod_bias ? g_samplers1 : g_samplers)[g.mips_on ? 1 : 0][slot] };   // s0 level 0 (key M picks the MaxLOD = 0 set), s1 level 1 (key L: the LOD bias)
+        ID3D11SamplerState* samps[2] = { g_samplers[g.mips_on ? 1 : 0][slot], g_samplers[g.mips_on ? 1 : 0][slot] };   // s0 level 0, s1 level 1: the SAME state (key M picks the MaxLOD = 0 set); level 1's LOD shift is const0.z, not a sampler bias
         set_uniforms();
         g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         g_ctx->IASetInputLayout(g.layout);

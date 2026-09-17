@@ -5,12 +5,13 @@
 // format's contract (../../docs/FORMAT.md section 4 and section 6) and not an implementation detail either viewer is
 // free to restate, so the arithmetic below is the other shader's line for line: `float4` reads `vec4`, `saturate` reads
 // `clamp(x, 0.0, 1.0)`, `[unroll]` is dropped, and `Texture2D` with its `SamplerState` becomes a `texture2D` and a
-// `sampler` combined at the point of use - which is what lets one key rewrite one sampler descriptor and nothing else.
+// `sampler` combined at the point of use - which is what lets one key rewrite one sampler descriptor and nothing else
+// (key M's maxLod; key L's LOD shift is a uniform now, const0.z, and rewrites no descriptor at all).
 //
 // Two standard mipmapped samples, nothing special (three when level 0 is in two files): what a game does. The hardware
-// picks each texture's mip from the same UV derivatives, and level 1's sampler carries the descriptor's
-// lod_bias_level1 so that output mip m reads mip m of BOTH latents - the 1:1 rule the encoder fitted. Nothing here
-// reconstructs texels: the representation is valid under the sampling operator.
+// picks each texture's mip from the same UV derivatives, and level 1's sample SCALES those derivatives by
+// 2^lod_bias_level1 (const0.z) so that output mip m reads mip m of BOTH latents - the 1:1 rule the encoder fitted.
+// Nothing here reconstructs texels: the representation is valid under the sampling operator.
 #version 450
 
 // Repeated verbatim from view.vert, and it has to be: shaderc compiles each stage on its own, and both stages declare
@@ -20,8 +21,8 @@ layout(std140, set = 0, binding = 0) uniform Constants {
     mat4  mvp;
     vec4  tex_size;
     vec4  lod_info;
-    vec4  const0;
-    vec4  const1;
+    vec4  const0;    // x / y = show level 0 / level 1 raw, z = level 1's UV-gradient scale, w = renormalise
+    vec4  const1;    // spare
     vec4  lo0, hi0;
     vec4  lo1, hi1;
     ivec4 dims;
@@ -34,7 +35,7 @@ layout(set = 0, binding = 1) uniform texture2D lat0;    // level 0: C0 channels 
 layout(set = 0, binding = 2) uniform texture2D lat1;    // level 1: C1 channels, a quarter of the resolution per axis
 layout(set = 0, binding = 3) uniform texture2D lat0b;   // level 0's channels past the first two, when they are a file of their own
 layout(set = 0, binding = 4) uniform sampler   samp;    // level 0's sampler
-layout(set = 0, binding = 5) uniform sampler   samp1;   // level 1's: the same filter plus the LOD bias
+layout(set = 0, binding = 5) uniform sampler   samp1;   // level 1's: the SAME unbiased sampler (no sampler carries a LOD bias; see const0.z)
 
 layout(location = 0) in  vec2 v_uv;
 layout(location = 0) out vec4 out_colour;
@@ -60,7 +61,13 @@ void decode_nntc(vec4 z0, vec4 z1, out float outv[18]) {
 void main() {
     vec4 s0 = texture(sampler2D(lat0, samp), v_uv);    // the uncompressed level 0, or a BC4 / BC5 (its channels in .rg)
     if (cb.sel.z == 2) s0.zw = texture(sampler2D(lat0b, samp), v_uv).rg;   // channels 2-3 from the second file; at C0 3 only .r is read below
-    vec4 s1 = texture(sampler2D(lat1, samp1), v_uv);   // level 1 through its own sampler (the LOD bias)
+    // Level 1 is a quarter of level 0's size, so left alone the GPU reads it two mips finer than level 0. The encoder
+    // pairs mip m of level 1 with mip m of level 0, so its UV gradients are scaled by const0.z = 2^lod_bias_level1
+    // (4; 1.0 when key L turns the rule off) to keep the two in step.
+    // Gradients rather than a sampler LOD bias of +2: the bias is fine on NVIDIA and AMD but blurs a magnified
+    // texture badly on Intel integrated graphics; scaled gradients work on all three. README.md, "The two ways to
+    // apply the level-1 mip shift", compares the two methods.
+    vec4 s1 = textureGrad(sampler2D(lat1, samp1), v_uv, dFdx(v_uv) * cb.const0.z, dFdy(v_uv) * cb.const0.z);
     if (cb.const0.x > 0.5) { out_colour = vec4(s0.rgb, 1.0); return; }   // level 0's texture as stored
     if (cb.const0.y > 0.5) { out_colour = vec4(s1.rgb, 1.0); return; }   // level 1's
     vec4 z0 = cb.lo0 + s0 * (cb.hi0 - cb.lo0);   // the dequantisation AFTER sampling (affine, so the blend of samples is the blend of values)

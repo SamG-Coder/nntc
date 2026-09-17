@@ -32,7 +32,7 @@ What is here, level by level:
   per-format check for linear filtering so that a device which cannot sample a block format is refused **by name**
   rather than by a wrong picture. The unused third slot gets a 1x1 image, because Vulkan has no null descriptor here;
 * the sixteen samplers of the plan's section 1.10 -- `[mips on / off][point, bilinear, trilinear, anisotropic 8x]`,
-  twice, the second set carrying level 1's `mipLodBias` from the descriptor's `lod_bias_level1` -- with clamp
+  (one set: level 1's LOD shift is in the gradients, not in a sampler) -- with clamp
   addressing throughout, and a line at load if the device's `maxSamplerLodBias` is below what the descriptor asks for;
 * one uniform buffer of 2032 bytes holding the other viewer's two constant blocks end to end, and a descriptor set of
   separate sampled images and samplers, so that a key rewrites one sampler descriptor and nothing else;
@@ -94,7 +94,7 @@ The Direct3D viewer's keys, letter for letter:
 | `P` / `B` / `T` | point / bilinear / trilinear filtering |
 | `X` | anisotropic filtering on / off (on by default, `maxAnisotropy` 8; it applies in TRILINEAR mode only, and in the other two the overlay says the flag is remembered and idle). On a device that does not report `samplerAnisotropy` the key says `anisotropy unsupported on this device` and changes nothing, and the overlay reads `Aniso:OFF (unsupported)` |
 | `M` | mips on / off (a second sampler set with `maxLod` 0, so the hardware reads mip 0 of both textures; nothing is reloaded) |
-| `L` | level 1's LOD bias on / off (on by default: the descriptor's `lod_bias_level1`, which is the encoder's 1:1 mip rule) |
+| `L` | level 1's LOD shift on / off (on by default: its UV gradients scaled by `2^lod_bias_level1`, which is the encoder's 1:1 mip rule) |
 | `N` | the next output texture of the material, cycling through all of them -- up to six, which is what the shader's `W[108]`, `bias_[5]` and `outv[18]` carry |
 | `V` | renormalise the shown triple as a tangent-space normal (unpack, unit length, repack; grey-ish and black-ish / z < 0 pixels are left alone; off by default) |
 | `1` / `2` | show level 0's texture as stored, or level 1's |
@@ -120,7 +120,7 @@ build\Release\nntc_view_vk.exe examples\m1_m4_c0_3_c1_4_nntc.json --device 1
 | `--cube` | the cube rather than the quad (the key `C`) |
 | `--z F`, `--yaw F`, `--pitch F` | the camera, in the other viewer's units |
 | `--nomips` | the sampler's `maxLod` is 0, so every fetch reads mip 0 (the key `M` off) |
-| `--nobias` | level 1 without its `mipLodBias` of `log2(block)` (the key `L` off): the control, not a preference |
+| `--nobias` | level 1 without its LOD shift of `log2(block)`, i.e. its UV gradients unscaled (the key `L` off): the control, not a preference |
 | `--noaniso` | anisotropy off, which applies in the trilinear mode only (the key `X` off) |
 | `--renorm` | renormalise the decoded triple as a tangent-space normal (the key `V`) |
 | `--raw0` | show level 0's own channels instead of the decode (the key `1`) |
@@ -137,7 +137,7 @@ The name of the device that was chosen is printed at start either way, so there 
 frame, and so is the surface format the swapchain took. An unknown flag, a malformed number, a `--shot` with no name, a
 `--shot` whose directory is not there (refused before any Vulkan object exists), a `--size` with one value or below 16,
 a `--device` that is not a number or past the end, a frame larger than the device's `maxImageDimension2D`, a
-`lod_bias_level1` past the device's `maxSamplerLodBias` in either direction, and a surface that offers neither
+`lod_bias_level1` outside `[0, 8]`, the range the mip shift can mean, and a surface that offers neither
 `B8G8R8A8_UNORM` nor `R8G8B8A8_UNORM` all print a line beginning `ERROR` to stderr and exit 1. A machine this viewer
 cannot run on at all -- no loader, a loader below 1.3, or no device that is 1.3 -- says **`no Vulkan device`**, which is
 the phrase the release gate reads to skip its Vulkan arms rather than fail them. **Running on other GPUs** below is the
@@ -156,7 +156,7 @@ The same four-line debug strip, drawn with the same 8x8 font at the same scale i
    count, then the block factor, then the GPU memory of what is bound. Level 0's format reads `BC5 (file)` or
    `BC5+BC4 (file)` when the file itself is block-compressed and nothing was packed here, `U8` when it is uncompressed
    and the load-time pack is not bound, and `BC5 lossless` or `BC5 41.2dB` when it is (key `4`);
-2. **the state**: quad or cube, the filter, the anisotropy (and whether it is idle), mips on or off, level 1's LOD bias
+2. **the state**: quad or cube, the filter, the anisotropy (and whether it is idle), mips on or off, level 1's LOD shift
    on or off, which texture of the material is shown, whether the decode or a raw latent is shown, and the renormalise
    flag;
 3. **the camera**: x, y, z, yaw, pitch;
@@ -300,8 +300,10 @@ are looking at.
   separated the two would need a second one and is refused rather than half-supported;
 * **anisotropy is optional**. A missing `samplerAnisotropy` is one `note:` line and the key `X` is then permanently
   off;
-* **`maxSamplerLodBias`** at least the asset's `lod_bias_level1` (2.0 at the default block factor). Every part offers
-  far more; a file that asked for more than the device allows is a refusal by name rather than a silently clamped bias.
+* **no `maxSamplerLodBias` requirement at all.** Level 1's LOD shift is applied to the UV gradients handed to
+  `textureGrad`, not to a sampler, so no sampler here carries a bias and the limit does not apply. What is checked
+  instead is that the descriptor's `lod_bias_level1` lies in `[0, 8]` -- the range a mip shift can mean -- refused by
+  name at load. Until v1.1.21 this viewer used a sampler LOD bias of +2 on the second latent instead; it was switched because of mipmap LOD calculation differences on Intel parts against AMD and NVIDIA ones. A sampler LOD bias of the same value is equivalent on hardware that keeps a negative base LOD under magnification (NVIDIA, AMD), but was observed to blur a magnified picture badly on Intel Xe integrated graphics, so the gradient form is the one to ship.
 
 Nothing here is an extension: `VK_KHR_swapchain` is the only one the windowed path enables, and the
 cooperative-vector path is a separate, optional, one-vendor addition that the last section of this file describes.
@@ -364,7 +366,7 @@ what is claimed of them is only what can be seen by eye.
 
 * **With anisotropy off the two viewers' frames are byte-identical, in every state a `--shot` can be put in**: a single
   image, a four-texture material at each of its four textures, and a two-file level 0; the default camera and `--z -50`,
-  where mips and level 1's LOD bias are live; `--nomips` and `--nobias`; `--raw0`, `--raw1`, `--cube`, and the
+  where mips and level 1's LOD shift are live; `--nomips` and `--nobias`; `--raw0`, `--raw1`, `--cube`, and the
   load-time BC pack of an uncompressed level 0, which both viewers make from the same `../shared/bc_pack.h`.
 * **With anisotropy on (the default) they part company only where the taps are placed.** On the four-texture material
   that is a largest difference of 46 to 49 out of 255 on texture 0 at a PSNR of 49.85 dB (6, 21 to 23 and 24 on the

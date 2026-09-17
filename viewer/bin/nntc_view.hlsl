@@ -13,7 +13,7 @@ cbuffer SceneConstants : register(b0)
     float4x4 mvp;       // CPU builds row-major and transposes once at cbuffer-write time
     float4   texSize;   // xy = level 0's base size, zw = level 1's base size
     float4   lodInfo;   // x = level 0's mip count - 1, y = level 1's
-    float4   const0;    // x = show level 0's texture raw, y = show level 1's raw (keys 1 / 2), z spare, w = renormalise the shown triple as a tangent-space normal (key V)
+    float4   const0;    // x = show level 0's texture raw, y = show level 1's raw (keys 1 / 2), z = the factor level 1's UV gradients are scaled by before its sample (2^lod_bias_level1 with the 1:1 mip rule on, 1 with key L off), w = renormalise the shown triple as a tangent-space normal (key V)
     float4   const1;    // spare (keys 5-8)
 };
 
@@ -32,7 +32,7 @@ Texture2D    lat0 : register(t0);   // level 0: C0 channels (R8 / R8G8 / R8G8B8A
 Texture2D    lat1 : register(t1);   // level 1: C1 channels, a quarter of the resolution per axis
 Texture2D    lat0b : register(t2);  // level 0's channels past the first two, in a texture of their own (sel.z = the texture count: 0 = the single uncompressed t0)
 SamplerState samp : register(s0);
-SamplerState samp1 : register(s1);  // level 1's sampler: the same filter with MipLODBias = log2(block) (key L, on by default), so the hardware follows the encoder's 1:1 rule (output mip m reads mip m of BOTH latents: level 1 has a quarter of the texels per axis, so without the bias the GPU reads it two mips finer than fitted); with L off it is the s0 sampler
+SamplerState samp1 : register(s1);  // level 1's sampler: the SAME unbiased sampler as s0 (no sampler in this viewer carries a LOD bias any more). The 1:1 mip rule lives in the gradients handed to SampleGrad below, through const0.z
 
 struct VSInput  { float3 pos : POSITION; float2 uv : TEXCOORD0; };
 struct VSOutput { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -66,13 +66,16 @@ void DecodeNNTC(float4 z0, float4 z1, out float outv[18])
 
 float4 PSMain(VSOutput input) : SV_Target
 {
-    // Two standard mipmapped texture samples, nothing special (three when level 0 is in two files and t2 is bound): what a game does.
-    // The hardware picks each texture's mip from the same
-    // UV derivatives: at 1:1 on screen level 0 sits at its mip 0 and level 1 (a quarter of the resolution per axis) is magnified 4x from
-    // its mip 0; as the surface recedes each chain steps down on its own.
+    // Two standard mipmapped texture samples (three when level 0 is in two files and t2 is bound): what a game does.
     float4 s0 = lat0.Sample(samp, input.uv);   // the uncompressed level 0, or a BC4 / BC5 (its channels in .rg, the same sampler)
     if (sel.z == 2) s0.zw = lat0b.Sample(samp, input.uv).rg;   // channels 2-3 from the second texture; at C0 3 it is a BC4 and only .r (channel 2) is read below
-    float4 s1 = lat1.Sample(samp1, input.uv);   // level 1 through its own sampler (the LOD bias)
+    // Level 1 is a quarter of level 0's size, so left alone the GPU reads it two mips finer than level 0. The encoder
+    // pairs mip m of level 1 with mip m of level 0, so its UV gradients are scaled by const0.z = 2^lod_bias_level1
+    // (4; 1.0 when key L turns the rule off) to keep the two in step.
+    // Gradients rather than a sampler LOD bias of +2: the bias is fine on NVIDIA and AMD but blurs a magnified
+    // texture badly on Intel integrated graphics; scaled gradients work on all three. README.md, "The two ways to
+    // apply the level-1 mip shift", compares the two methods.
+    float4 s1 = lat1.SampleGrad(samp1, input.uv, ddx(input.uv) * const0.z, ddy(input.uv) * const0.z);
     if (const0.x > 0.5) return float4(s0.rgb, 1.0);   // key 1: level 0's texture as stored (its channels as RGB)
     if (const0.y > 0.5) return float4(s1.rgb, 1.0);   // key 2: level 1's
     float4 z0 = lo0 + s0 * (hi0 - lo0);   // the dequantisation AFTER sampling (affine, so the blend of samples is the blend of values)

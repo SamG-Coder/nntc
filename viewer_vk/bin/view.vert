@@ -18,7 +18,7 @@ layout(std140, set = 0, binding = 0) uniform Constants {
     mat4  mvp;          // built row-major on the host and transposed once, so these are the columns
     vec4  tex_size;     // xy = level 0's base size, zw = level 1's
     vec4  lod_info;     // x = level 0's mip count - 1, y = level 1's
-    vec4  const0;       // x = show level 0 raw, y = show level 1 raw, z spare, w = renormalise the shown triple
+    vec4  const0;       // x = show level 0 raw, y = show level 1 raw, z = level 1's UV-gradient scale, w = renormalise the shown triple
     vec4  const1;       // spare
     vec4  lo0, hi0;     // level 0's dequantisation per channel: value = lo + sample * (hi - lo)
     vec4  lo1, hi1;     // level 1's

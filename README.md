@@ -306,8 +306,49 @@ faster on the scene draw at 2560x1440; every other device never hears of it.
 `viewer_vk/README.md` has its key table, its flags, the parity numbers, the cooperative-vector measurements and what
 differs between the two.
 
-**If you write your own consumer**, the one thing to get right: **the quarter-resolution texture's sampler needs
-`MipLODBias = 2`** (the JSON's `lod_bias_level1`), so that both textures are read from the same mip. Everything else is
+### The two ways to apply the level-1 mip shift
+
+The quarter-resolution latent has to be read from the mip the encoder paired with level 0's: `lod_bias_level1` = 2
+levels coarser than the GPU would pick on its own. There are two ways to ask the hardware for that, and they are not
+interchangeable on every GPU.
+
+| | **A. sampler LOD bias** (NVIDIA / AMD) | **B. scaled gradients** (Intel / generic; what the viewers ship) |
+| --- | --- | --- |
+| how | level 1's sampler carries `MipLODBias` / `mipLodBias` = `lod_bias_level1` (+2); the shader uses a plain `Sample` / `texture` | the shader samples level 1 with `SampleGrad` / `textureGrad`, both UV derivatives multiplied by `2^lod_bias_level1` (4); no sampler bias |
+| cost | one sampler-state field, nothing in the shader | explicit-gradient sampling, which some hardware runs a little slower than a plain sample |
+| mip selection | correct on NVIDIA and AMD. **Wrong on Intel integrated graphics**: a magnified texture comes out very blurry (seen on a 13th-generation Core i7 under Direct3D 11 and Vulkan; the base LOD of a magnified texture seems not to go negative there, so +2 lands on mip 2 instead of clamping back to mip 0) | correct on NVIDIA, AMD and Intel: the +2 is inside the LOD the hardware computes, before any clamp |
+| trilinear / bilinear / point | the reference | the same mips and the same picture as A (measured byte-identical on an integrated Radeon and within rounding on an RTX 5090) |
+| anisotropic | the better picture: the bias moves the LOD and leaves the line the anisotropic taps are spread along at its true length | somewhat blurrier on oblique surfaces: scaling both gradients also makes that tap line 4 times longer. Measured against a 16x-supersampled reference on close, steeply angled views, A was ahead by 3 to 7 dB on both an RTX 5090 and an integrated Radeon; square-on, or with anisotropy off, there is no difference |
+
+**A refinement of B, documented and not shipped.** B's extra blur under anisotropic filtering comes from scaling
+both gradients. Scaling only the footprint's SHORT axis by 4 raises the LOD by the same 2 levels and leaves the line
+the anisotropic taps are spread along at its true length. `ddx(uv)` and `ddy(uv)` are not that ellipse's axes, so
+the shader has to find them first (the closed-form 2x2 eigen-decomposition of the UV Jacobian, about ten
+instructions), scale the short one, and pass the two axis vectors to `SampleGrad`. It also has to know the
+sampler's maximum anisotropy `A`, because the hardware's LOD is `log2(max(short, long / A))` and it is that whole
+quantity which must rise by 2: with `A` wrong the result is worse than the plain scale (measured), so it is more
+fragile than it looks. Measured here it matches the bias or edges it by up to 2 dB. The viewers keep the two-line form
+on purpose: it is simple, it is right on every vendor, and grazing angles only need to look good enough. An engine
+that wants the last few dB on oblique surfaces can add this itself.
+
+**Which to use.** B if one code path has to be right on every GPU, which is why both viewers use it. A if you know
+the hardware is NVIDIA or AMD, or you select per vendor at run time (PCI vendor `0x8086` is Intel): it is cheaper and
+it is the sharper picture under anisotropic filtering. Do not apply both at once: that is a shift of 4 levels, and
+it is blurry everywhere. In the viewers, key `L` (or `--nobias`) turns the shift off entirely, which shows what it
+is for.
+
+**A change of method (2026-09-17, v1.1.21).** Earlier versions of both viewers, and of this guidance, applied the
+shift as a sampler LOD bias of +2 on the second (quarter-resolution) latent. That was switched to scaled gradients
+because of mipmap LOD calculation differences between Intel parts and AMD / NVIDIA ones: on Intel integrated graphics
+(observed on a 13th-generation Core i7 under both Direct3D 11 and Vulkan) the +2 bias made the second latent, and so
+the decoded picture, very blurry whenever the texture was magnified, while on AMD and NVIDIA it was correct. Scaled
+gradients pick the right mip on all three, so they are what the viewers ship; the next section sets the two methods
+side by side, including what the gradient form costs under anisotropic filtering. Nothing in the files changed:
+`lod_bias_level1` in the descriptor is the same number, applied a different way.
+
+**If you write your own consumer**, the one thing to get right: **the quarter-resolution texture must be sampled with
+its UV gradients scaled by `2^lod_bias_level1` = 4** (`SampleGrad` / `textureGrad`), so that both textures are read
+from the same mip; a sampler LOD bias of the same value selects the same mips on hardware that keeps a negative base LOD under magnification (NVIDIA, AMD) and is the sharper picture there under anisotropic filtering, but was observed to blur a magnified picture badly on Intel Xe integrated graphics, so the gradient form is the one to ship. Everything else is
 `lo + sample * (hi - lo)` on each channel, then `out = W * [c, s, s*c] + b`. `docs/FORMAT.md` specifies the files byte
 by byte, and `tools/dds_decode.py` is a reference decoder of about 500 lines in Python.
 
@@ -356,8 +397,8 @@ textures of one surface tend to share the same edges and regions.
 
 The encoder does not leave that to luck. It fits fixed fractional subtexel sites as well as texel centres, with both
 latents and the source sampled by the same bilinear clamp rule the GPU will use. It also fits the stored mip chain, and
-the format requires level 1's sampler to carry `MipLODBias = log2(block)` (`lod_bias_level1`, 2 for the fixed block of
-4), so output mip `m` reads mip `m` of both latent textures. The optimisation target is therefore the real runtime
+the format requires level 1 to be sampled with its UV gradients scaled by `2^lod_bias_level1` (`log2(block)` = 2 for
+the fixed block of 4), so output mip `m` reads mip `m` of both latent textures. The optimisation target is therefore the real runtime
 operation -- filter the latents first, then decode -- rather than an ideal texel-grid reconstruction that the shader
 would never actually evaluate.
 

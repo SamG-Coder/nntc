@@ -680,14 +680,25 @@ above `--mip-min` per axis.
 Floor halving (`max(1, n/2)`) means level 1's plane `m` is not exactly a quarter of level 0's once an odd size appears
 in either chain. The drift is sub-texel and is exactly what the hardware's own chains do, so it is left alone.
 
-**On the GPU the rule is one sampler-state field.** The hardware picks each texture's mip from that texture's own texel
-density, and level 1 has `1/block` of the texels per axis, so its LOD sits `log2(block)` below level 0's: when level 0
-is at mip 1, level 1 is still at mip 0 - a plane fitted beside level 0's mip 0, not beside its mip 1. Level 1's sampler
-therefore carries `MipLODBias = log2(block) = 2`, the `lod_bias_level1` the JSON publishes. Its LOD then equals level
-0's at every distance, and at 1:1 on screen it goes from -2 to 0, still mip 0, so nothing changes at the base. Without
-the bias the decoder is fed the wrong colour plane from mip 1 down and the image goes splotchy at level-1 texel scale
-while the base stays right. Any consumer of the asset must do the same; the viewer does it by default, and key `L` (or
-`--nobias` with `--shot`) turns it off for comparison.
+**On the GPU the rule is one scale on the texture-coordinate gradients.** The hardware picks each texture's mip from
+that texture's own texel density, and level 1 has `1/block` of the texels per axis, so its LOD sits `log2(block)` below
+level 0's: when level 0 is at mip 1, level 1 is still at mip 0 - a plane fitted beside level 0's mip 0, not beside its
+mip 1. Level 1 is therefore sampled with `SampleGrad` / `textureGrad` with BOTH UV gradients multiplied by
+`2^lod_bias_level1` = `block` = 4, which raises the LOD the hardware computes by exactly `log2(block)` = 2 before any
+clamp. Its LOD then equals level 0's at every distance, and at 1:1 on screen it goes from -2 to 0, still mip 0, so
+nothing changes at the base, and it is still one ordinary hardware sample. Under anisotropic filtering it is not the
+same filter as a bias: scaling both gradients also lengthens the line the anisotropic taps are spread along, so an
+oblique surface is blurred along its long axis somewhat more than a bias would blur it (the README's "The two ways
+to apply the level-1 mip shift" has the measurements). Without the shift the decoder is fed the wrong colour plane from mip 1
+down and the image goes splotchy at level-1 texel scale while the base stays right.
+
+A sampler LOD bias of the same value is equivalent **only** where the hardware keeps a properly negative base LOD under
+magnification. NVIDIA and AMD parts do; on a 13th-gen Core i7's Intel Xe integrated GPU the biased sampler made a
+magnified quad VERY blurry in both viewers. The likely mechanism, inferred from the symptom and not measured, is a
+base LOD floored near 0 before the +2 is added, which lands on mip 2; Intel's own PRM documents bias-then-clamp and
+calls the base LOD computation implementation-dependent, so it is not excluded. So the gradient form is what this
+format asks a consumer for, and no sampler in this tree carries a LOD bias. Any consumer of the asset must do the
+same; both viewers do it by default, and key `L` (or `--nobias` with `--shot`) turns it off for comparison.
 
 ### 4.2 Every plane is a parameter
 
