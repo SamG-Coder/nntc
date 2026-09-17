@@ -148,7 +148,6 @@ let `find_package(Vulkan)` pick it up from `VULKAN_SDK`. Whether it then RUNS is
 The floor for the viewer is Vulkan headers 204 -- 1.3 core, which is what every frame is recorded with. Anything
 older stops at a `#error` naming the package to install.
 
-
 Notes: A run whose mipmaps come from `stb_image_resize2` (a named filter, or the `box` implied by `srgb`, `edge` or
 `normal_map`) can differ
 in the last bit between platforms, so those runs agree across platforms in PSNR rather than byte for byte
@@ -356,6 +355,8 @@ the decoded picture, very blurry whenever the texture was magnified, while on AM
 gradients pick the right mip on all three, so they are what the viewers ship; the next section sets the two methods
 side by side, including what the gradient form costs under anisotropic filtering. Nothing in the files changed:
 `lod_bias_level1` in the descriptor is the same number, applied a different way.
+
+The D3D 11 viewer has also been successfully tested on Windows ARM, Snapdragon X Elite (Lenovo ThinkPad T14s Gen 6-2024).
 
 **If you write your own consumer**, the one thing to get right: **the quarter-resolution texture must be sampled with
 its UV gradients scaled by `2^lod_bias_level1` = 4** (`SampleGrad` / `textureGrad`), so that both textures are read
