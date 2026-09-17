@@ -133,7 +133,7 @@ Two things about those lists are worth stating rather than discovering.
 prefers the distribution's SHARED `libshaderc`, because `libshaderc_combined.a` is not self-contained on every
 release -- Ubuntu 24.04's `libshaderc-dev` ships a 242 KB archive that defines neither `spvValidatorOptionsDestroy`
 nor `spvtools::Optimizer`, and a link against it alone fails on both -- while the shared library carries its
-dependencies as its own `NEEDED` entries. The combined archive stays the fallback, which is what a LunarG SDK install
+dependencies as its own `NEEDED` entries. The combined archive stays the fallback, which is what a [LunarG SDK install](https://www.lunarg.com/products/vulkan-sdk/)
 with no shared library on the path uses, and is what the Windows build links.
 
 **Cooperative vectors.** `VK_NV_cooperative_vector`, the accelerated decode path, first appears in Vulkan-Headers
