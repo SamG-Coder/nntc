@@ -12,7 +12,7 @@ material (the count is in [How it works](#how-it-works-briefly), below). No runt
 
 It uses a bilinear/degree-2 polynomial decoder, i.e. a degree-2 polynomial whose only quadratic terms are the products between the two latents stored as standard BC4/BC5/uncompressed mipmapped textures. The full-resolution latent texture(s) represent edge/detail information, while the quarter-resolution latent texture represents slowly varying material/color state.
 
-The `nntc_view` is a Windows D3D11 viewer that loads the .json and .dds files and displays the sampled and decoded results on a textured quad or a cube, with keyboard camera controls. `nntc_view_vk` is the same viewer on Vulkan, with the same window and keys, for Windows and Linux (`viewer_vk/README.md`).
+The `nntc_view` is a Windows D3D11 viewer, which runs on any GPU, that loads the .json and .dds files and displays the sampled and decoded results on a textured quad or a cube, with keyboard camera controls. `nntc_view_vk` is the same viewer on Vulkan, which also runs on any GPU, and with the same window and keys, for Windows and Linux (`viewer_vk/README.md`).
 
 Importantly, this method is compatible with normal GPU texture hardware bilinear, trilinear, and anisotropic filtering. The encoder ensures the encoded latents and the fitted coefficients are compatible with hardware filtering. The end result: large runtime memory savings due to packing 2-6 correlated material textures into a single set of latent textures, which are sampled normally and then decoded by a small pixel shader function.
 
