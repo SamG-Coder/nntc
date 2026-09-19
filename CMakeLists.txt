@@ -270,11 +270,16 @@ if(WIN32)
     endif()
 
     # The viewer compiles nntc_view.hlsl at runtime from the working directory or from beside the executable, so the
-    # shader travels with the build (edit it and press R to reload).
-    add_custom_command(TARGET nntc_view POST_BUILD
+    # shader travels with the build (edit it and press R to reload). The copy is its own target, run on every build
+    # (copy_if_different makes an unchanged shader a no-op), rather than a post-build step: a post-build step runs only
+    # when the executable relinks, so a change to the shader alone left a stale copy beside it.
+    add_custom_target(nntc_view_shader ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nntc_view>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${CMAKE_CURRENT_SOURCE_DIR}/viewer/bin/nntc_view.hlsl"
-                "$<TARGET_FILE_DIR:nntc_view>/nntc_view.hlsl")
+                "$<TARGET_FILE_DIR:nntc_view>/nntc_view.hlsl"
+        VERBATIM)
+    add_dependencies(nntc_view nntc_view_shader)
 endif()
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -424,16 +429,19 @@ else()
         endif()
     endif()
 
-    # The two GLSL files travel with the build and are compiled at runtime from BESIDE THE EXECUTABLE and from nowhere
+    # The GLSL files travel with the build and are compiled at runtime from BESIDE THE EXECUTABLE and from nowhere
     # else: edit the copy this command writes and the next run, or the key R, picks it up. The viewer used to look in
     # the working directory first, where a stray view.frag silently replaced the real one, so this copy is now the
-    # only file it can read.
+    # only file it can read. The copies are their own target, run on every build, as for nntc_view.hlsl above: a
+    # post-build copy ran only when the executable relinked, and a shader-only change stayed behind.
+    set(NNTC_VK_SHADER_COPY_COMMANDS COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nntc_view_vk>")
     foreach(NNTC_VK_SHADER view.vert view.frag view_coopvec.frag)
-        add_custom_command(TARGET nntc_view_vk POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${CMAKE_CURRENT_SOURCE_DIR}/viewer_vk/bin/${NNTC_VK_SHADER}"
-                    "$<TARGET_FILE_DIR:nntc_view_vk>/${NNTC_VK_SHADER}")
+        list(APPEND NNTC_VK_SHADER_COPY_COMMANDS COMMAND ${CMAKE_COMMAND} -E copy_if_different
+             "${CMAKE_CURRENT_SOURCE_DIR}/viewer_vk/bin/${NNTC_VK_SHADER}"
+             "$<TARGET_FILE_DIR:nntc_view_vk>/${NNTC_VK_SHADER}")
     endforeach()
+    add_custom_target(nntc_view_vk_shaders ALL ${NNTC_VK_SHADER_COPY_COMMANDS} VERBATIM)
+    add_dependencies(nntc_view_vk nntc_view_vk_shaders)
 endif()
 
 # ---------------------------------------------------------------------------------------------------------------------
