@@ -26,19 +26,18 @@ static void glfw_error(int code, const char* text) { fprintf(stderr, "GLFW error
 static const struct { int app, glfw; } GLFW_KEY_MAP[] = {
     { KEY_ESCAPE, GLFW_KEY_ESCAPE }, { KEY_SPACE, GLFW_KEY_SPACE }, { KEY_LEFT, GLFW_KEY_LEFT },
     { KEY_RIGHT, GLFW_KEY_RIGHT }, { KEY_UP, GLFW_KEY_UP }, { KEY_DOWN, GLFW_KEY_DOWN },
-    { KEY_SHIFT, GLFW_KEY_LEFT_SHIFT }, { KEY_SHIFT, GLFW_KEY_RIGHT_SHIFT },
+    { KEY_SHIFT, GLFW_KEY_LEFT_SHIFT }, { KEY_SHIFT, GLFW_KEY_RIGHT_SHIFT }, { KEY_F1, GLFW_KEY_F1 },
 };
 
 static int glfw_to_app_key(int key) {
     for (const auto& e : GLFW_KEY_MAP) if (e.glfw == key) return e.app;
-    return (key >= '0' && key <= '9') || (key >= 'A' && key <= 'Z') ? key : 0;
+    return (key >= '0' && key <= '9') || (key >= 'A' && key <= 'Z') ? key : KEY_OTHER;
 }
 
 static void glfw_key(GLFWwindow*, int key, int, int action, int) {
     if (action != GLFW_PRESS) return;   // GLFW_REPEAT is a key already down, and a release is not a strike
     if (g_shot) return;                 // the shot frame is a function of the command line alone
-    const int app = glfw_to_app_key(key);
-    if (app) app_key_struck(app);
+    app_key_struck(glfw_to_app_key(key));   // every key, the unused ones as KEY_OTHER: any key closes the help page
 }
 
 // The size is not acted on here, for the Win32 block's reason: the callback only raises the flag the frame loop

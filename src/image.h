@@ -103,6 +103,23 @@ inline FILE* image_fopen_utf8(const std::string& path, const char* mode)
 //
 // A 16-bit file still arrives through the 8-bit API, which reduces it to bytes exactly as it did before - req_comp
 // changes which channels come back, not their depth.
+// The largest source the encoder accepts, per axis. A sane bound rather than a hard one: raise it here if a larger
+// input is really wanted (the working set grows with the texel count; a 16384 x 16384 texture is 268M texels).
+static const int IMAGE_MAX_DIM = 16384;
+
+// The width and height of an image file from its header alone, without decoding it; false if stb cannot tell.
+inline bool image_dimensions(const std::string& path, int& w, int& h)
+{
+    w = h = 0;
+    int comp = 0;
+    FILE* f = image_fopen_utf8(path, "rb");
+    if (!f)
+        return false;
+    const bool ok = stbi_info_from_file(f, &w, &h, &comp) != 0;
+    fclose(f);
+    return ok;
+}
+
 inline bool image_load_rgb(const std::string& path, Image& img, bool& alpha_ignored)
 {
     int w = 0, h = 0, comp = 0;
@@ -141,27 +158,31 @@ inline bool image_load_rgb(const std::string& path, Image& img, bool& alpha_igno
 }
 
 // stb_image_write defines this one in its implementation but leaves it out of its header, so it is declared here for
-// the translation units that only see the header (the implementation lives in main.cpp).
+// the translation units that only see the header. main.cpp holds the implementation and skips the declaration: after
+// the definition, gcc warns that the redeclaration lacks the definition's attributes.
+#ifndef NNTC_STBIW_DEFINED
 STBIWDEF unsigned char* stbi_write_png_to_mem(const unsigned char* pixels, int stride_bytes, int x, int y, int n,
                                               int* out_len);
+#endif
 
 // The PNG bytes are made in memory by stb and written by this tree's own checked write: stbi_write_png ignores a short
 // fwrite and reports success, and it opens the path with the narrow fopen. Here every write and the close are checked
-// (a full disk is an ERROR, not a PNG that looks written) and the path goes through image_fopen_utf8.
+// (a full disk is reported, not a PNG that looks written) and the path goes through image_fopen_utf8. These PNGs are a
+// viewing aid written after the asset, so a failure is a WARNING on stdout and the run still succeeds.
 inline bool image_write_png_checked(const std::string& path, int w, int h, const uint8_t* rgb)
 {
     int len = 0;
     unsigned char* png = stbi_write_png_to_mem(rgb, w * 3, w, h, 3, &len);
     if (!png || len <= 0)
     {
-        fprintf(stderr, "ERROR: could not encode '%s' as a PNG\n", path.c_str());
+        printf("WARNING: could not encode '%s' as a PNG\n", path.c_str());
         free(png);   // stb's buffer is malloc'ed unless STBIW_MALLOC was overridden, which this tree does not
         return false;
     }
     FILE* f = image_fopen_utf8(path, "wb");
     if (!f)
     {
-        fprintf(stderr, "ERROR: cannot write '%s'\n", path.c_str());
+        printf("WARNING: cannot write '%s'\n", path.c_str());
         free(png);   // stb's buffer is malloc'ed unless STBIW_MALLOC was overridden, which this tree does not
         return false;
     }
@@ -170,7 +191,7 @@ inline bool image_write_png_checked(const std::string& path, int w, int h, const
     free(png);   // stb's buffer is malloc'ed unless STBIW_MALLOC was overridden, which this tree does not
     if (!ok || !closed)
     {
-        fprintf(stderr, "ERROR: writing '%s' failed (a short write or a failed close: is the disk full?)\n", path.c_str());
+        printf("WARNING: writing '%s' failed (a short write or a failed close: is the disk full?)\n", path.c_str());
         return false;
     }
     return true;

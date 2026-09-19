@@ -17,16 +17,62 @@
 
 #include "model.h"
 
+// " on device 0 'NVIDIA ...' (1234/32607 MB free)", or as much of it as the runtime will still say. After a fault that
+// has poisoned the context none of these answer, and the note is left out rather than made up.
+inline void cuda_device_note(char* out, size_t size)
+{
+    out[0] = 0;
+    int dev = 0;
+    cudaDeviceProp prop;
+    size_t free_bytes = 0, total_bytes = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || cudaGetDeviceProperties(&prop, dev) != cudaSuccess)
+        return;
+    if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess)
+        snprintf(out, size, " on device %d '%s' (%zu/%zu MB free)", dev, prop.name, free_bytes >> 20,
+                 total_bytes >> 20);
+    else
+        snprintf(out, size, " on device %d '%s'", dev, prop.name);
+}
+
+// What a user can do about a GPU that is too small: the same advice wherever the memory ran out.
+#define CUDA_OOM_ADVICE "the material is too large for this GPU; try --backend cpu, fewer or smaller textures, or " \
+                        "fewer latent channels"
+
+// The report of a failed CUDA call: the call, where it is, and the runtime's own name and words for the error. Out of
+// memory is said as plainly as the device allocator says it (init.cu, device_alloc), because it is the one failure a
+// user can do something about. A kernel's fault is not seen where the kernel was launched but by the next call that
+// waits for it, and that is said too, so the call named is not taken for the culprit.
+[[noreturn]] inline void cuda_fail(cudaError_t err, const char* call, const char* file, int line)
+{
+    const char* base = file;
+    for (const char* s = file; *s; s++)
+        if (*s == '/' || *s == '\\')
+            base = s + 1;
+    if (err == cudaErrorMemoryAllocation)
+    {
+        char note[512];
+        cuda_device_note(note, sizeof(note));
+        fprintf(stderr, "ERROR: out of GPU memory in CUDA call %s at %s:%d%s: %s\n", call, base, line, note,
+                CUDA_OOM_ADVICE);
+        exit(EXIT_FAILURE);
+    }
+    const bool fault = err == cudaErrorIllegalAddress || err == cudaErrorLaunchFailure ||
+                       err == cudaErrorLaunchTimeout || err == cudaErrorIllegalInstruction ||
+                       err == cudaErrorMisalignedAddress || err == cudaErrorHardwareStackError ||
+                       err == cudaErrorAssert;
+    fprintf(stderr, "ERROR: CUDA call %s failed at %s:%d: %s (%s)%s\n", call, base, line, cudaGetErrorString(err),
+            cudaGetErrorName(err),
+            fault ? "; a kernel's fault is reported by the first CUDA call that waits for it, so it may have come from "
+                    "an earlier launch" : "");
+    exit(EXIT_FAILURE);
+}
+
 #define CUDA_CHECK(call)                                                                                    \
     do                                                                                                      \
     {                                                                                                       \
         const cudaError_t err_ = (call);                                                                    \
         if (err_ != cudaSuccess)                                                                            \
-        {                                                                                                   \
-            fprintf(stderr, "ERROR: CUDA %s at %s:%d: %s\n", #call, __FILE__, __LINE__,                      \
-                    cudaGetErrorString(err_));                                                              \
-            exit(EXIT_FAILURE);                                                                             \
-        }                                                                                                   \
+            cuda_fail(err_, #call, __FILE__, __LINE__);                                                     \
     } while (0)
 
 static const int MAX_CHANNELS = 4;    // the per-level channel cap the shader and the .dds formats share

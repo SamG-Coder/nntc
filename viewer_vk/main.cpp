@@ -9,7 +9,8 @@
 //           X anisotropy on / off (trilinear only), N next output texture, M mips on / off (the sampler's maxLod 0),
 //           L level 1's LOD shift on / off (the 1:1 mip rule, carried by the gradients), V renormalise the shown
 //           triple as a tangent-space normal, 1 show level 0's texture as stored, 2 show level 1's, 4 level 0 from
-//           the BC4 / BC5 pack made at load, R reload both shaders from disk, Space reset, Esc quit.
+//           the BC4 / BC5 pack made at load, R reload both shaders from disk, Space reset, Esc quit, F1 a help
+//           page of every key (any key closes it).
 //
 // The program this one is a sibling of is viewer/main.cpp, the Direct3D 11 viewer, and the reason a second viewer
 // exists at all is that the format's claim is about THE hardware sampling operator rather than one vendor's: a second
@@ -147,6 +148,43 @@ static int  WINDOW_HEIGHT = 720;
 // the strip is drawn scaled down to the window's width (record_overlay_draw), so the text stays whole and smaller
 // rather than being cut off at the right.
 static const int OVL_W = 2560, OVL_H = 84, FONT_SCALE = 2, LINE_ADV = 20;
+// The help page (key F1): every key this viewer handles, drawn below the strip in the same image and by the same
+// rasteriser. It is the Direct3D viewer's page with this viewer's own keys - K, and R's three shaders - and any key
+// closes it.
+static const char* HELP_LINES[] = {
+    "Help - any key closes this page",
+    "",
+    "Camera (hold):",
+    "  Arrows      move the quad or cube left / right / up / down",
+    "  W / S       zoom in / out",
+    "  A / D       yaw",
+    "  Q / E       pitch",
+    "  Shift       with any of the above: one third the speed",
+    "  Space       reset: the camera, the shown texture, and keys 1 2 V 5-8 off",
+    "Display:",
+    "  C           quad / cube",
+    "  N           next output texture of a material (cycles)",
+    "  1           show level 0's texture as stored (toggle)",
+    "  2           show level 1's texture as stored (toggle)",
+    "  V           renormalise the shown texture as a tangent-space normal (toggle)",
+    "Sampling:",
+    "  P / B / T   point / bilinear / trilinear filter",
+    "  X           anisotropic filtering on/off (applies in trilinear only)",
+    "  M           mips on/off (off: the sampler's maxLod 0, every fetch reads mip 0)",
+    "  L           level 1's LOD shift on/off (its gradients x 2^lod_bias_level1)",
+    "  4           level 0 from the load-time BC4/BC5 pack on/off (uncompressed level 0 only)",
+    "Decode:",
+    "  K           cooperative-vector decode on/off (only where the device has the extension)",
+    "Other:",
+    "  5 6 7 8     the shader's spare debug constants (unused by the shipped shaders)",
+    "  R           reload the shaders (view.vert, view.frag, view_coopvec.frag)",
+    "  F1          this page",
+    "  Esc         quit (with this page open: close the page only)",
+};
+static const int HELP_N = (int)(sizeof(HELP_LINES) / sizeof(HELP_LINES[0]));
+static const int OVL_TEX_H = OVL_H + 8 + HELP_N * LINE_ADV;   // the image holds the strip and the help page below it
+static bool g_help = false;    // F1: the help page is shown
+static int  g_help_eat = 0;    // the key that closed the help page: ignored by the held-key scan until it is released
 // Where the stage-4 decode-path token is drawn on the state line: twelve characters in from the right edge of the
 // strip, which is past the end of anything the four shared lines can print (the longest is about 110 characters of
 // the 160 that fit). tests/run_checks.py compares the two viewers' strips over the columns before it.
@@ -2240,7 +2278,7 @@ static void init_overlay(void) {
     VkImageCreateInfo ii{};
     ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     ii.imageType = VK_IMAGE_TYPE_2D; ii.format = VK_FORMAT_R8G8B8A8_UNORM;
-    ii.extent = { (uint32_t)OVL_W, (uint32_t)OVL_H, 1 }; ii.mipLevels = 1; ii.arrayLayers = 1;
+    ii.extent = { (uint32_t)OVL_W, (uint32_t)OVL_TEX_H, 1 }; ii.mipLevels = 1; ii.arrayLayers = 1;
     ii.samples = VK_SAMPLE_COUNT_1_BIT; ii.tiling = VK_IMAGE_TILING_OPTIMAL;
     ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2259,10 +2297,10 @@ static void init_overlay(void) {
     vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     VK_CHECK(vkCreateImageView(g_device, &vi, nullptr, &g_overlay_image.view));
 
-    create_buffer((VkDeviceSize)OVL_W * OVL_H * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    create_buffer((VkDeviceSize)OVL_W * OVL_TEX_H * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                   g_overlay_staging, g_overlay_staging_memory);
-    VK_CHECK(vkMapMemory(g_device, g_overlay_staging_memory, 0, (VkDeviceSize)OVL_W * OVL_H * 4, 0, &g_overlay_mapped));
+    VK_CHECK(vkMapMemory(g_device, g_overlay_staging_memory, 0, (VkDeviceSize)OVL_W * OVL_TEX_H * 4, 0, &g_overlay_mapped));
 
     // A point sampler with no mips: the strip is drawn at its own size and a filtered fetch would only blur the glyphs.
     // It is created here rather than taken from the scene's eight, because those carry the keys' state.
@@ -2544,7 +2582,7 @@ static void blit_char(std::vector<uint8_t>& buf, int px, int py, char ch) {
         if (!((glyph[y] >> x) & 1)) continue;
         for (int sy = 0; sy < FONT_SCALE; sy++) for (int sx = 0; sx < FONT_SCALE; sx++) {
             const int X = px + x * FONT_SCALE + sx, Y = py + y * FONT_SCALE + sy;
-            if (X < 0 || X >= OVL_W || Y < 0 || Y >= OVL_H) continue;
+            if (X < 0 || X >= OVL_W || Y < 0 || Y >= OVL_TEX_H) continue;
             uint8_t* d = &buf[((size_t)Y * OVL_W + X) * 4];
             d[0] = 255; d[1] = 255; d[2] = 255; d[3] = 255;
         }
@@ -2558,8 +2596,13 @@ static const char* format_name(int dxgi) {
 
 static void update_debug_text(void) {
     if (!g.debug_dirty) return;
-    std::vector<uint8_t> buf((size_t)OVL_W * OVL_H * 4);
-    for (size_t i = 0; i < buf.size(); i += 4) { buf[i] = 0; buf[i + 1] = 0; buf[i + 2] = 0; buf[i + 3] = 180; }
+    std::vector<uint8_t> buf((size_t)OVL_W * OVL_TEX_H * 4);
+    for (size_t i = 0; i < (size_t)OVL_W * OVL_H * 4; i += 4) { buf[i] = 0; buf[i + 1] = 0; buf[i + 2] = 0; buf[i + 3] = 180; }
+    // The help page's backdrop is only as wide as its longest line; below the strip the rest stays transparent.
+    int help_w = 0;
+    for (int i = 0; i < HELP_N; i++) help_w = std::max(help_w, (int)strlen(HELP_LINES[i]));
+    help_w = std::min(OVL_W, 8 + help_w * 8 * FONT_SCALE);
+    for (int y = OVL_H; y < OVL_TEX_H; y++) for (int x = 0; x < help_w; x++) buf[((size_t)y * OVL_W + x) * 4 + 3] = 200;
     char l0[256], l1[256], l2[256];
     // The load-time pack's own name: one BC4 or BC5, and for three or four channels the second texture's format too
     // (three channels put channel 2 alone in a BC4, four put channels 2-3 in a second BC5).
@@ -2618,12 +2661,16 @@ static void update_debug_text(void) {
              const0[0] > 0.5f ? "LATENT0" : (const0[1] > 0.5f ? "LATENT1" : "DECODE"), const0[3] > 0.5f ? "ON " : "OFF");
     snprintf(l2, sizeof(l2), "X:%+5.1f Y:%+5.1f Z:%5.1f Yaw:%+6.1f Pitch:%+6.1f", (double)g.x, (double)g.y, (double)g.z,
              (double)g.yaw, (double)g.pitch);
-    const char* l3 = "Move:Arrows/WS Rot:ADQE C:cube B/T/P:filter X:aniso M:mips L:L1lod N:tex V:renorm 1/2:latents "
+    const char* l3 = "F1=Help  Move:Arrows/WS Rot:ADQE C:cube B/T/P:filter X:aniso M:mips L:L1lod N:tex V:renorm 1/2:latents "
                      "4:BC-pack R:reload Spc:reset Esc";
     const char* lines[4] = { l0, l1, l2, l3 };
     for (int li = 0; li < 4; li++) {
         int y = 2 + li * LINE_ADV, x = 4;
         for (const char* p = lines[li]; *p; ++p) { blit_char(buf, x, y, *p); x += 8 * FONT_SCALE; }
+    }
+    for (int li = 0; li < HELP_N; li++) {
+        int y = OVL_H + 6 + li * LINE_ADV, x = 4;
+        for (const char* p = HELP_LINES[li]; *p; ++p) { blit_char(buf, x, y, *p); x += 8 * FONT_SCALE; }
     }
     // The decode path, on the state line and at a FIXED column rather than appended to it. The Direct3D viewer
     // has no such state and cannot grow one - it is the program this one is measured against - so the four lines
@@ -2654,7 +2701,7 @@ static void record_overlay_upload(VkCommandBuffer cmd) {
     region.bufferOffset = 0; region.bufferRowLength = 0; region.bufferImageHeight = 0;
     region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
     region.imageOffset = { 0, 0, 0 };
-    region.imageExtent = { (uint32_t)OVL_W, (uint32_t)OVL_H, 1 };
+    region.imageExtent = { (uint32_t)OVL_W, (uint32_t)OVL_TEX_H, 1 };
     vkCmdCopyBufferToImage(cmd, g_overlay_staging, g_overlay_image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     image_barrier(cmd, g_overlay_image.image, VK_IMAGE_ASPECT_COLOR_BIT,
                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -2673,12 +2720,14 @@ static void record_overlay_draw(VkCommandBuffer cmd, VkExtent2D extent) {
     // At 1:1 the strip is OVL_W pixels wide. A window narrower than that would cut it off at the right, so there the
     // strip is scaled down to the window's width, text and all; the --shot frame is never narrower and is unchanged.
     const float fit = extent.width < (uint32_t)OVL_W ? (float)extent.width / (float)OVL_W : 1.0f;
-    const float w = (float)OVL_W * fit / (float)extent.width * 2.0f, h = (float)OVL_H * fit / (float)extent.height * 2.0f;
+    const int rows = g_help ? OVL_TEX_H : OVL_H;   // the strip alone, or the strip and the help page below it
+    const float w = (float)OVL_W * fit / (float)extent.width * 2.0f, h = (float)rows * fit / (float)extent.height * 2.0f;
+    const float v = (float)rows / (float)OVL_TEX_H;
     const float verts[16] = {
         -1.0f,     1.0f,     0.0f, 0.0f,
         -1.0f + w, 1.0f,     1.0f, 0.0f,
-        -1.0f + w, 1.0f - h, 1.0f, 1.0f,
-        -1.0f,     1.0f - h, 0.0f, 1.0f,
+        -1.0f + w, 1.0f - h, 1.0f, v,
+        -1.0f,     1.0f - h, 0.0f, v,
     };
     memcpy(g_overlay_geometry_mapped, verts, sizeof(verts));
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_overlay_pipeline);
@@ -2914,10 +2963,17 @@ static void reload_shaders(void) {
         fprintf(stderr, "Shader reload failed, keeping previous shader.\n");
 }
 
+bool app_help_open(void) { return g_help; }
+
 void app_key_struck(int key) {
     float* const0 = g.cb.scene.const0;
     float* const1 = g.cb.scene.const1;
+    // With the help page open any key closes it and does nothing else: Esc closes the page, not the viewer, and a
+    // held movement key that closed it does not move the camera until it is released. KEY_OTHER is no key the
+    // held-key scan reads, so there is nothing to wait for.
+    if (g_help) { g_help = false; g_help_eat = key == KEY_OTHER ? 0 : key; g.debug_dirty = true; return; }
     switch (key) {
+        case KEY_F1: g_help = true; g.debug_dirty = true; break;
         case KEY_ESCAPE: g_quit_requested = true; break;
         case 'R': reload_shaders(); break;
         case 'B': g.filter_mode = 1; g.debug_dirty = true; printf("Filter: BILINEAR\n"); break;
@@ -2985,18 +3041,21 @@ void app_key_struck(int key) {
 
 static void app_process_held_keys(float dt) {
     if (g_shot) return;   // the shot frame is a function of the command line and the asset, and of nothing else
-    if (win_key_held(KEY_SHIFT)) dt *= 1.0f / 3.0f;
+    if (g_help) return;   // the help page is modal: nothing moves while it is open
+    if (g_help_eat && !win_key_held(g_help_eat)) g_help_eat = 0;   // the key that closed the page is up again
+    auto held = [](int key) { return key != g_help_eat && win_key_held(key); };
+    if (held(KEY_SHIFT)) dt *= 1.0f / 3.0f;
     bool moved = false;
-    if (win_key_held('W')) { g.z += Z_SPEED * dt; moved = true; }
-    if (win_key_held('S')) { g.z -= Z_SPEED * dt; moved = true; }
-    if (win_key_held(KEY_LEFT))  { g.x += XY_SPEED * dt; moved = true; }
-    if (win_key_held(KEY_RIGHT)) { g.x -= XY_SPEED * dt; moved = true; }
-    if (win_key_held(KEY_UP))    { g.y += XY_SPEED * dt; moved = true; }
-    if (win_key_held(KEY_DOWN))  { g.y -= XY_SPEED * dt; moved = true; }
-    if (win_key_held('A')) { g.yaw += ROT_SPEED * dt; moved = true; }
-    if (win_key_held('D')) { g.yaw -= ROT_SPEED * dt; moved = true; }
-    if (win_key_held('Q')) { g.pitch += ROT_SPEED * dt; moved = true; }
-    if (win_key_held('E')) { g.pitch -= ROT_SPEED * dt; moved = true; }
+    if (held('W')) { g.z += Z_SPEED * dt; moved = true; }
+    if (held('S')) { g.z -= Z_SPEED * dt; moved = true; }
+    if (held(KEY_LEFT))  { g.x += XY_SPEED * dt; moved = true; }
+    if (held(KEY_RIGHT)) { g.x -= XY_SPEED * dt; moved = true; }
+    if (held(KEY_UP))    { g.y += XY_SPEED * dt; moved = true; }
+    if (held(KEY_DOWN))  { g.y -= XY_SPEED * dt; moved = true; }
+    if (held('A')) { g.yaw += ROT_SPEED * dt; moved = true; }
+    if (held('D')) { g.yaw -= ROT_SPEED * dt; moved = true; }
+    if (held('Q')) { g.pitch += ROT_SPEED * dt; moved = true; }
+    if (held('E')) { g.pitch -= ROT_SPEED * dt; moved = true; }
     if (g.z < Z_MAX) g.z = Z_MAX;
     if (g.z > Z_MIN) g.z = Z_MIN;
     if (moved) g.debug_dirty = true;

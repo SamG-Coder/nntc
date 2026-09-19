@@ -47,6 +47,7 @@
 #include <string>
 #include <vector>
 
+#include "backend.h"
 #include "bc_pack.h"
 #include "model.h"
 
@@ -434,11 +435,11 @@ void level0_plane_values(const Model& m, int plane, bool bc, bool packed, std::v
     }
 }
 
-void reconstruct_levels(DeviceModel* d, const Model& m, std::vector<std::vector<uint8_t>>& recon)
+void be::reconstruct_levels(be::Device* d, const Model& m, std::vector<std::vector<uint8_t>>& recon)
 {
     recon.assign(m.planes.size(), std::vector<uint8_t>());
     for (size_t i = 0; i < m.planes.size(); i++)
-        decode_plane(d, m, (int)i, recon[i]);
+        be::decode_plane(d, m, (int)i, recon[i]);
 }
 
 // THE ENCODER NEVER DELETES A FILE (the owner's rule). A run with a different layout may leave files of the same prefix
@@ -647,8 +648,8 @@ bool write_asset(const Model& m, const std::string& prefix, const std::string& j
             else if (!quiet)
                 printf("level 0 pack: lossy at %d bits, packing psnr %.2f dB over %zu channel-texels of the chain "
                        "(against the exact index values; a block carries eight of the %d values)\n", max_bits,
-                       10.0 * std::log10(255.0 * 255.0 / (se / (double)packed_texels)), packed_texels,
-                       1 << max_bits);
+                       se > 0.0 ? 10.0 * std::log10(255.0 * 255.0 / (se / (double)packed_texels)) : 100.0,
+                       packed_texels, 1 << max_bits);   // 100 dB for an exact pack, as every other psnr here
             if (!lossless && !quiet)
                 printf("              the encoder packs and decodes the plane before it measures anything, so the "
                        "report above is of these same blocks\n");

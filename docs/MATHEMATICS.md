@@ -182,7 +182,10 @@ The joint problem is non-convex (the `s c` products), and exact block descent ca
 more than in a gradient method.
 
 - Level 1: block means of the source over each 4x4 footprint (`--init box`, the default; channels beyond 3T start at
-  zero, so a single RGB texture with `C1 = 4` starts channel 3 dead until the solve gives it a direction) or their PCA
+  zero, so a single RGB texture with `C1 = 4` starts channel 3 dead until the solve gives it a direction; a source
+  channel that is an exact copy of an earlier one - a grayscale texture's G and B - is taken only after every distinct
+  channel, so a gray first texture does not give level 1 identical, collinear channels whose split only rounding
+  would decide; a lone gray texture has nothing else to take and is unchanged) or their PCA
   over the plane (`--init pca`, each component scaled by its max |value|, NOT its standard deviation, which clipped the
   dominant component and cost half a dB). The two tie on single images; on a multi-texture set of unrelated pictures
   `pca` is the one to use (section 6, last bullet).
@@ -214,10 +217,12 @@ more than in a gradient method.
 Every mip plane of BOTH latents is a parameter (nothing is filtered into existence); plane `m` is solved by the same
 three blocks against mip `m` of the run's OWN source chain (`docs/DESIGN.md` 4.2: the iterated 2x2 box by default --
 floor halving, a 1-wide plane repeats its row -- or the per-texture filter a material asked for). The 1:1
-rule: output mip `m` reads mip `m` of both latents. On the GPU that is a `MipLODBias = +2` on level 1's sampler (its
-natural LOD sits two below level 0's because it has a quarter of the texels per axis); without it the decoder is fed
-level 1's mip 0 plane against level 0's mip 1 and the result goes splotchy from mip 1 down. The JSON carries
-`lod_bias_level1: 2`. Planes are independent given `W`, so they run on separate streams; the mip weights govern only how
+rule: output mip `m` reads mip `m` of both latents. Level 1's natural LOD sits two below level 0's because it has a
+quarter of the texels per axis; without a correction the decoder is fed level 1's mip 0 plane against level 0's mip 1
+and the result goes splotchy from mip 1 down. The viewers read level 1 with `SampleGrad` / `textureGrad`, both UV
+derivatives multiplied by `2^lod_bias_level1` = 4, which puts its LOD exactly on level 0's; a sampler `MipLODBias = +2`
+does the same on hardware that honours it under magnification, but blurs on Intel Xe (README, "the two ways to apply
+level 1's mip shift"). The JSON carries `lod_bias_level1: 2`. Planes are independent given `W`, so they run on separate streams; the mip weights govern only how
 `W`'s capacity is split between levels. Trilinear and anisotropic filtering need no training change: they are blends of
 samples and the decoder is affine in the samples.
 

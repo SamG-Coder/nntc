@@ -364,7 +364,12 @@ def main():
         for level in range(len(z0)):
             img = decode_level(meta, z0, z1, level)
             for t in range(textures):
-                ref = load_rgb8(png_name(ref_prefix, textures, t, level))
+                path = png_name(ref_prefix, textures, t, level)
+                if not os.path.isfile(path):
+                    print('ERROR: %s does not exist; --ref compares against the run\'s own recon PNGs, which are '
+                          'written by --png 1' % path)
+                    return 1
+                ref = load_rgb8(path)
                 cw = min(ref.shape[1], img.shape[1])
                 ch = min(ref.shape[0], img.shape[0])
                 a = img[:ch, :cw, 3 * t:3 * t + 3].astype(int)

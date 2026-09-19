@@ -569,6 +569,39 @@ static void create_cube() {
 // Debug text overlay (8x8 font rasterized to an RGBA texture, drawn as a quad).
 // ---------------------------------------------------------------------------
 static const int OVL_W = 2560, OVL_H = 84, FONT_SCALE = 2, LINE_ADV = 20;   // the overlay strip spans the wider window
+// The help page (key F1): every key the viewer handles, drawn below the status strip in the same texture. Any key closes it.
+static const char* HELP_LINES[] = {
+    "Help - any key closes this page",
+    "",
+    "Camera (hold):",
+    "  Arrows      move the quad or cube left / right / up / down",
+    "  W / S       zoom in / out",
+    "  A / D       yaw",
+    "  Q / E       pitch",
+    "  Shift       with any of the above: one third the speed",
+    "  Space       reset: the camera, the shown texture, and keys 1 2 V 5-8 off",
+    "Display:",
+    "  C           quad / cube",
+    "  N           next output texture of a material (cycles)",
+    "  1           show level 0's texture as stored (toggle)",
+    "  2           show level 1's texture as stored (toggle)",
+    "  V           renormalise the shown texture as a tangent-space normal (toggle)",
+    "Sampling:",
+    "  P / B / T   point / bilinear / trilinear filter",
+    "  X           anisotropic filtering on/off (applies in trilinear only)",
+    "  M           mips on/off (off: every fetch reads mip 0)",
+    "  L           level 1's LOD shift on/off (its gradients x 2^lod_bias_level1)",
+    "  4           level 0 from the load-time BC4/BC5 pack on/off (uncompressed level 0 only)",
+    "Other:",
+    "  5 6 7 8     the shader's spare debug constants (unused by the shipped shader)",
+    "  R           reload the shader (nntc_view.hlsl)",
+    "  F1          this page",
+    "  Esc         quit (with this page open: close the page only)",
+};
+static const int HELP_N = (int)(sizeof(HELP_LINES) / sizeof(HELP_LINES[0]));
+static const int OVL_TEX_H = OVL_H + 8 + HELP_N * LINE_ADV;   // the texture holds the strip and the help page below it
+static bool g_help = false;    // F1: the help page is shown
+static int  g_help_eat = 0;    // the key that closed the help page: ignored by the held-key scan until it is released
 static const char* DEBUG_HLSL =
     "struct VSO { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
     "VSO VSMain(float2 pos : POSITION, float2 uv : TEXCOORD0) {\n"
@@ -583,15 +616,19 @@ static void blit_char(std::vector<uint8_t>& buf, int px, int py, char ch) {
         if (!((glyph[y]>>x)&1)) continue;
         for (int sy=0;sy<FONT_SCALE;sy++) for (int sx=0;sx<FONT_SCALE;sx++) {
             int X=px+x*FONT_SCALE+sx, Y=py+y*FONT_SCALE+sy;
-            if (X<0||X>=OVL_W||Y<0||Y>=OVL_H) continue;
+            if (X<0||X>=OVL_W||Y<0||Y>=OVL_TEX_H) continue;
             uint8_t* d=&buf[(Y*OVL_W+X)*4]; d[0]=255;d[1]=255;d[2]=255;d[3]=255;
         }
     }
 }
 static void update_debug_text() {
     if (!g.debug_dirty) return;
-    std::vector<uint8_t> buf(OVL_W*OVL_H*4);
-    for (size_t i=0;i<buf.size();i+=4){ buf[i]=0;buf[i+1]=0;buf[i+2]=0;buf[i+3]=180; }
+    std::vector<uint8_t> buf(OVL_W*OVL_TEX_H*4);
+    for (size_t i=0;i<(size_t)OVL_W*OVL_H*4;i+=4){ buf[i]=0;buf[i+1]=0;buf[i+2]=0;buf[i+3]=180; }
+    // The help page's backdrop is only as wide as its longest line; below the strip the rest stays transparent.
+    int help_w = 0; for (int i=0;i<HELP_N;i++) help_w = std::max(help_w, (int)strlen(HELP_LINES[i]));
+    help_w = std::min(OVL_W, 8 + help_w*8*FONT_SCALE);
+    for (int y=OVL_H;y<OVL_TEX_H;y++) for (int x=0;x<help_w;x++) buf[(y*OVL_W+x)*4+3]=200;
     char l0[256], l1[256], l2[256];
     // The load-time pack's own name: one BC4 or BC5, and for three or four channels the second texture's format too
     // (three channels put channel 2 alone in a BC4, four put channels 2-3 in a second BC5).
@@ -637,12 +674,13 @@ static void update_debug_text() {
              g.cube?"CUBE":"QUAD", filter_name(g.filter_mode), aniso_s, g.mips_on?"ON ":"OFF", g.lod_bias?"ON ":"OFF", g.tex_shown, g.textures_out,
              g.const0[0]>0.5f?"LATENT0":(g.const0[1]>0.5f?"LATENT1":"DECODE"), g.const0[3]>0.5f?"ON ":"OFF");
     snprintf(l2,sizeof(l2),"X:%+5.1f Y:%+5.1f Z:%5.1f Yaw:%+6.1f Pitch:%+6.1f", g.x,g.y,g.z,g.yaw,g.pitch);
-    const char* l3 = "Move:Arrows/WS Rot:ADQE C:cube B/T/P:filter X:aniso M:mips L:L1lod N:tex V:renorm 1/2:latents 4:BC-pack R:reload Spc:reset Esc";
+    const char* l3 = "F1=Help  Move:Arrows/WS Rot:ADQE C:cube B/T/P:filter X:aniso M:mips L:L1lod N:tex V:renorm 1/2:latents 4:BC-pack R:reload Spc:reset Esc";
     const char* lines[4] = {l0,l1,l2,l3};
     for (int li=0; li<4; li++) { int y = 2 + li*LINE_ADV, x = 4; for (const char* p=lines[li]; *p; ++p) { blit_char(buf, x, y, *p); x += 8*FONT_SCALE; } }
+    for (int li=0; li<HELP_N; li++) { int y = OVL_H + 6 + li*LINE_ADV, x = 4; for (const char* p=HELP_LINES[li]; *p; ++p) { blit_char(buf, x, y, *p); x += 8*FONT_SCALE; } }
     D3D11_MAPPED_SUBRESOURCE map{};
     if (SUCCEEDED(g_ctx->Map(g.debug_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
-        for (int y = 0; y < OVL_H; y++) memcpy((uint8_t*)map.pData + y * map.RowPitch, &buf[y * OVL_W * 4], OVL_W * 4);
+        for (int y = 0; y < OVL_TEX_H; y++) memcpy((uint8_t*)map.pData + y * map.RowPitch, &buf[y * OVL_W * 4], OVL_W * 4);
         g_ctx->Unmap(g.debug_tex, 0);
     }
     g.debug_dirty = false;
@@ -677,7 +715,7 @@ static bool init_debug() {
     g.debug_ib = make_buffer(idx, sizeof(idx), D3D11_BIND_INDEX_BUFFER);
     if (!g.debug_ib) return false;
     D3D11_TEXTURE2D_DESC td{};
-    td.Width = OVL_W; td.Height = OVL_H; td.MipLevels = 1; td.ArraySize = 1;
+    td.Width = OVL_W; td.Height = OVL_TEX_H; td.MipLevels = 1; td.ArraySize = 1;
     td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DYNAMIC; td.BindFlags = D3D11_BIND_SHADER_RESOURCE; td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(g_dev->CreateTexture2D(&td, nullptr, &g.debug_tex))) return false;
@@ -688,8 +726,9 @@ static bool g_overlay = true;   // --nooverlay: draw the scene alone, so two --s
 static void draw_debug_text() {
     if (!g.debug_vs || !g_overlay) return;
     update_debug_text();
-    float w = (float)OVL_W / WINDOW_WIDTH * 2.0f, h = (float)OVL_H / WINDOW_HEIGHT * 2.0f;
-    float verts[] = { -1.0f, 1.0f, 0.0f, 0.0f,  -1.0f + w, 1.0f, 1.0f, 0.0f,  -1.0f + w, 1.0f - h, 1.0f, 1.0f,  -1.0f, 1.0f - h, 0.0f, 1.0f };
+    const int rows = g_help ? OVL_TEX_H : OVL_H;   // the strip alone, or the strip and the help page below it
+    float w = (float)OVL_W / WINDOW_WIDTH * 2.0f, h = (float)rows / WINDOW_HEIGHT * 2.0f, v = (float)rows / OVL_TEX_H;
+    float verts[] = { -1.0f, 1.0f, 0.0f, 0.0f,  -1.0f + w, 1.0f, 1.0f, 0.0f,  -1.0f + w, 1.0f - h, 1.0f, v,  -1.0f, 1.0f - h, 0.0f, v };
     D3D11_MAPPED_SUBRESOURCE map{};
     if (SUCCEEDED(g_ctx->Map(g.debug_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) { memcpy(map.pData, verts, sizeof(verts)); g_ctx->Unmap(g.debug_vb, 0); }
     const float blend_factor[4] = {0,0,0,0};
@@ -754,10 +793,17 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CLOSE: case WM_DESTROY: g_quit = true; PostQuitMessage(0); return 0;
         case WM_SIZE: if (wp != SIZE_MINIMIZED) resize_backbuffer((int)LOWORD(lp), (int)HIWORD(lp)); return 0;
+        case WM_SYSKEYDOWN:   // Alt and F10 arrive here: they close the help page too, and otherwise go to DefWindowProc as before
+            if (!g_shot && g_help && !(lp & (1 << 30))) { g_help = false; g_help_eat = (int)wp; g.debug_dirty = true; return 0; }
+            break;
         case WM_KEYDOWN: {
             if (g_shot) return 0;   // a keystroke that lands in the shot window changes nothing it draws
             if (lp & (1 << 30)) return 0;
+            // With the help page open any key closes it and does nothing else: Esc closes the page, not the viewer, and a
+            // held movement key that closed it does not move the camera until it is released.
+            if (g_help) { g_help = false; g_help_eat = (int)wp; g.debug_dirty = true; return 0; }
             switch (wp) {
+                case VK_F1: g_help = true; g.debug_dirty = true; break;
                 case VK_ESCAPE: g_quit = true; break;
                 case 'R': reload_shader(); break;
                 case 'B': g.filter_mode=1; g.debug_dirty=true; printf("Filter: BILINEAR\n"); break;
@@ -786,10 +832,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
-static bool key_down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+static bool key_down(int vk) { return vk != g_help_eat && (GetAsyncKeyState(vk) & 0x8000) != 0; }
 static void process_held_keys(HWND hwnd, float dt) {
     if (g_shot) return;   // see above: the shot frame is a function of the command line and the asset, and of nothing else
     if (GetForegroundWindow() != hwnd) return;
+    if (g_help) return;   // the help page is modal: nothing moves while it is open
+    if (g_help_eat && !(GetAsyncKeyState(g_help_eat) & 0x8000)) g_help_eat = 0;   // the key that closed the page is up again
     if (key_down(VK_SHIFT)) dt *= 1.0f/3.0f;
     bool moved=false;
     if (key_down('W')) {g.z+=Z_SPEED*dt;moved=true;}

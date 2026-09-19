@@ -49,10 +49,14 @@ void win_idle(void);
 // The keys the viewer knows, as the program's own codes rather than the platform's, so that the key handling is
 // written once and each platform block translates into it. A letter or a digit IS its ASCII character - which is also
 // its Win32 virtual-key code, so that half of the translation is the identity - and the named keys take values below
-// 32, which no character uses.
-enum AppKey { KEY_ESCAPE = 1, KEY_SPACE, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN, KEY_SHIFT };
+// 32, which no character uses. KEY_OTHER is every key the viewer has no use for: it is still delivered, because
+// with the help page open any key at all closes it.
+enum AppKey { KEY_ESCAPE = 1, KEY_SPACE, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN, KEY_SHIFT, KEY_F1, KEY_OTHER };
 
 // The two functions the platform blocks call into: one struck key, and one frame's held-key scan. They are defined far
 // below, beside the state they change, because what a key means is not a windowing concern.
 void app_key_struck(int key);
+// Whether the help page (F1) is open, for the Win32 block's system keys - Alt and F10 - which close the page too
+// and otherwise go to the window system as before.
+bool app_help_open(void);
 

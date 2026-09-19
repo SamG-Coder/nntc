@@ -17,15 +17,16 @@ than one program in this tree reads), the decoder constant buffer and the shader
 ## Building
 
 `nntc_view` and `bc_check` are built by the repository's root CMakeLists on Windows. Neither needs CUDA: on a
-machine without the toolkit the root CMakeLists skips the encoder and builds them alone, so the plain command is
+machine without the toolkit the root CMakeLists builds them beside an encoder with its CPU backend only, so the plain
+command is
 
 ```
 cmake -B build -S . -G "Visual Studio 18 2026"
 cmake --build build --config Release
 ```
 
-and a machine that also builds the encoder adds the CUDA toolset (`-T cuda=13.4`, or `-G "Visual Studio 17 2022"
--T cuda=13.1`), as the root README's Building section describes.
+and a machine that also builds the encoder's GPU backend adds the CUDA toolset (`-T cuda=13.4`, or `-G "Visual
+Studio 17 2022" -T cuda=13.1`), as the root README's Building section describes.
 
 `nntc_view.hlsl` is copied next to the executable by the build; the viewer compiles it at runtime from the working
 directory or from beside the executable, so it can be edited and reloaded with `R`.
@@ -54,7 +55,7 @@ overlay says the flag is remembered and idle),
 `N` next output texture of the material, cycling through all of them - up to SIX, which is what the shader's `W[108]`,
 `bias[5]` and `outv[18]` carry and what `viewer/main.cpp` checks the decoder's shape against (`nout <= 18`),
 `1` show level 0's texture as stored, `2` show level 1's, `4` level 0 from the BC4 / BC5 pack made
-at load - which exists only when the file's level 0 is UNCOMPRESSED, and does nothing for the block-compressed default (below), `R` reload the shader, `Space` reset, `Esc` quit. Keys `5`-`8` set the shader's spare debug constants and do
+at load - which exists only when the file's level 0 is UNCOMPRESSED, and does nothing for the block-compressed default (below), `R` reload the shader, `Space` reset, `Esc` quit, `F1` a help page of every key below the overlay (any key closes it and does nothing else; `Esc` then closes only the page). Keys `5`-`8` set the shader's spare debug constants and do
 nothing in the shader as it ships.
 
 `--shot FILE.bmp` renders one frame and exits. Its state comes from `--cube`, `--z`, `--yaw`, `--pitch`, `--tex`, `--raw0`,
@@ -76,7 +77,8 @@ clamps a 2560x1440 request to the work area - and a later `WM_SIZE` carrying tha
 therefore the steady one and, with `--shot`'s keyboard reads gone as well (above), `--shot` writes the same bytes on every launch
 and the release gate compares two assets' frames with no warm-up run.
 
-Sampling: one standard mipmapped call per texture -- two, or three when level 0 is in two files. Level 1's is a `SampleGrad` whose two UV
+Sampling: one standard mipmapped call per texture -- two, or three when level 0 is in two files. Every one is a `SampleGrad`, so both
+latents are filtered the same way on every implementation; level 0's takes the pixel's own derivatives. Level 1's is a `SampleGrad` whose two UV
 derivatives are both multiplied by `2^lod_bias_level1` (4 at block 4), which raises the LOD the hardware computes by exactly `log2(block)`
 before any clamp: level 1 has a quarter of the texels per axis, so the GPU's own LOD for it sits two mips finer than level 0's, while the
 encoder fitted output mip m from mip m of BOTH latents (the 1:1 rule). Scaling both gradients lines the two up, and it is still one ordinary hardware sample (under anisotropic filtering it is a little blurrier on oblique surfaces than a sampler bias would be, because the longer gradients also lengthen the line the anisotropic taps are spread along: the root README's "The two ways to apply the level-1 mip shift"); at 1:1 on screen level 1 is still at its

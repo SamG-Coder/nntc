@@ -63,6 +63,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 #include <vector>
 
 #include "device.cuh"
@@ -74,35 +75,76 @@
 
 bool device_select(int index, DeviceInfo& info)
 {
+    // A refusal leaves a whole reason in info.error for the caller's WARNING or ERROR. The common ones are said in plain
+    // words (a machine with no NVIDIA GPU is the everyday case, not a fault); anything else carries the runtime's own.
+    // A failure of cudaGetDeviceCount is the runtime's, not a device's, so it names no device.
+    auto refused = [&info, index](const char* call, cudaError_t err) {
+        info.error = "CUDA device " + std::to_string(index) + " could not be used (" + call + ": " +
+                     cudaGetErrorString(err) + " (" + cudaGetErrorName(err) + "))";
+        return false;
+    };
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count <= 0)
-        return false;
-    if (index < 0 || index >= count)
-        return false;
-    if (cudaSetDevice(index) != cudaSuccess)
-        return false;
-    cudaDeviceProp prop;
-    if (cudaGetDeviceProperties(&prop, index) != cudaSuccess)
-        return false;
-    // The compiled floor is compute capability 8.0 (CMakeLists.txt). A pre-Ampere device would otherwise fail at the
-    // first launch with "no kernel image is available", which says nothing about why, so it is refused here by name.
-    if (prop.major < 8)
+    cudaError_t err = cudaGetDeviceCount(&count);
+    if (err == cudaErrorNoDevice || (err == cudaSuccess && count <= 0))
     {
-        fprintf(stderr, "ERROR: device %d is '%s', compute capability %d.%d; this encoder is compiled for 8.0 and "
-                        "above\n", index, prop.name, prop.major, prop.minor);
+        info.error = "no NVIDIA GPU was found";
         return false;
     }
+    if (err == cudaErrorInsufficientDriver)
+    {
+        info.error = "there is no NVIDIA driver, or it is older than this build's CUDA runtime";
+        return false;
+    }
+    if (err == cudaErrorMemoryAllocation)
+    {
+        info.error = "the CUDA runtime could not start: out of host memory";
+        return false;
+    }
+    if (err != cudaSuccess)
+    {
+        info.error = std::string("the CUDA runtime could not start (cudaGetDeviceCount: ") + cudaGetErrorString(err) +
+                     " (" + cudaGetErrorName(err) + "))";
+        return false;
+    }
+    if (index < 0 || index >= count)
+    {
+        info.error = "there is no CUDA device " + std::to_string(index) + " (the machine has " + std::to_string(count) +
+                     " CUDA device" + (count == 1 ? "" : "s") + ")";
+        return false;
+    }
+    err = cudaSetDevice(index);
+    if (err != cudaSuccess)
+        return refused("cudaSetDevice", err);
+    cudaDeviceProp prop;
+    err = cudaGetDeviceProperties(&prop, index);
+    if (err != cudaSuccess)
+        return refused("cudaGetDeviceProperties", err);
+    // The compiled floor is compute capability 8.0 (CMakeLists.txt). A pre-Ampere device would otherwise fail at the
+    // first launch with "no kernel image is available", which says nothing about why, so it is refused here, with its
+    // name and capability left in info for the caller to report (a WARNING where it falls back, an ERROR where not).
     info.name = prop.name;
     info.major = prop.major;
     info.minor = prop.minor;
-    return true;
+    return prop.major >= 8;
 }
 
-// Every cudaMalloc of the run goes through this, so the report can name the device memory the encode holds.
+// Every cudaMalloc of the run goes through this, so the report can name the device memory the encode holds, and so
+// the one failure a user can act on - the material does not fit - is said in the user's terms: no CPU fallback, one
+// ERROR with the size asked for, what the encode already held, and what the device had left.
 template <typename T>
 static void device_alloc(DeviceModel* d, T** p, size_t bytes)
 {
-    CUDA_CHECK(cudaMalloc(p, bytes));
+    const cudaError_t err = cudaMalloc(p, bytes);
+    if (err == cudaErrorMemoryAllocation)
+    {
+        char note[512];
+        cuda_device_note(note, sizeof(note));
+        fprintf(stderr, "ERROR: out of GPU memory allocating %.1f MB for the encode's device model (%.1f MB already "
+                        "allocated)%s: %s\n", bytes / 1048576.0, d->device_bytes / 1048576.0, note, CUDA_OOM_ADVICE);
+        exit(EXIT_FAILURE);
+    }
+    if (err != cudaSuccess)
+        cuda_fail(err, "cudaMalloc(p, bytes)", __FILE__, __LINE__);
     d->device_bytes += bytes;
 }
 
@@ -231,8 +273,21 @@ DeviceModel* device_create(const Model& m, const std::vector<Image>& source_chai
         device_alloc(d, &d->resid, rgb8 * sizeof(float));
 
     // Pinned staging, so the one copy a block makes of what the host reports does not go through a bounce buffer.
-    CUDA_CHECK(cudaMallocHost(&d->host_scalars, m.planes.size() * (size_t)SC_COUNT * sizeof(double)));
-    CUDA_CHECK(cudaMallocHost(&d->host_counters, m.planes.size() * 5 * sizeof(unsigned int)));
+    // Its memory is the host's, so running out of it is not the GPU's shortage and is not said as one.
+    auto pinned = [](cudaError_t err, size_t bytes) {
+        if (err == cudaErrorMemoryAllocation)
+        {
+            fprintf(stderr, "ERROR: out of host memory while allocating %zu bytes of pinned staging for the CUDA "
+                            "device model\n", bytes);
+            exit(EXIT_FAILURE);
+        }
+        if (err != cudaSuccess)
+            cuda_fail(err, "cudaMallocHost", __FILE__, __LINE__);
+    };
+    const size_t scalar_bytes = m.planes.size() * (size_t)SC_COUNT * sizeof(double);
+    const size_t counter_bytes = m.planes.size() * 5 * sizeof(unsigned int);
+    pinned(cudaMallocHost(&d->host_scalars, scalar_bytes), scalar_bytes);
+    pinned(cudaMallocHost(&d->host_counters, counter_bytes), counter_bytes);
 
     d->scratch_floats = scratch;
     d->rgb8_bytes = rgb8;
@@ -245,73 +300,87 @@ size_t device_memory(const DeviceModel* d)
     return d ? d->device_bytes : 0;
 }
 
+// The teardown's check. Nothing is left to protect by stopping here, so a failed release is a WARNING rather than an
+// ERROR, and only the first is described: after a fault that poisoned the context every release fails the same way.
+static void release_check(cudaError_t err, const char* call, int line, int& failed)
+{
+    if (err != cudaSuccess && failed++ == 0)
+        printf("WARNING: CUDA call %s failed at init.cu:%d while releasing the device model: %s (%s)\n", call, line,
+               cudaGetErrorString(err), cudaGetErrorName(err));
+}
+#define RELEASE(call) release_check((call), #call, __LINE__, failed)
+
 void device_destroy(DeviceModel* d)
 {
     if (!d)
         return;
+    int failed = 0;
     for (DevPlane& p : d->planes)
     {
-        cudaFree(p.src);
-        cudaFree(p.v0);
-        cudaFree(p.v1);
-        cudaFree(p.k0);
-        cudaFree(p.k1);
-        cudaFree(p.stencil);
-        cudaFree(p.grad);
-        cudaFree(p.precond);
-        cudaFree(p.cg_x);
-        cudaFree(p.cg_r);
-        cudaFree(p.cg_z);
-        cudaFree(p.cg_p);
-        cudaFree(p.cg_ap);
-        cudaFree(p.q1_prev);
-        cudaFree(p.stencil0);
-        cudaFree(p.grad0);
-        cudaFree(p.precond0);
-        cudaFree(p.cg0_x);
-        cudaFree(p.cg0_r);
-        cudaFree(p.cg0_z);
-        cudaFree(p.cg0_p);
-        cudaFree(p.cg0_ap);
-        cudaFree(p.q0_prev);
-        cudaFree(p.bc_ep);
-        cudaFree(p.bc_sel);
-        cudaFree(p.bc_stats);
-        cudaFree(p.partial);
-        cudaFree(p.scalars);
-        cudaFree(p.counters);
+        RELEASE(cudaFree(p.src));
+        RELEASE(cudaFree(p.v0));
+        RELEASE(cudaFree(p.v1));
+        RELEASE(cudaFree(p.k0));
+        RELEASE(cudaFree(p.k1));
+        RELEASE(cudaFree(p.stencil));
+        RELEASE(cudaFree(p.grad));
+        RELEASE(cudaFree(p.precond));
+        RELEASE(cudaFree(p.cg_x));
+        RELEASE(cudaFree(p.cg_r));
+        RELEASE(cudaFree(p.cg_z));
+        RELEASE(cudaFree(p.cg_p));
+        RELEASE(cudaFree(p.cg_ap));
+        RELEASE(cudaFree(p.q1_prev));
+        RELEASE(cudaFree(p.stencil0));
+        RELEASE(cudaFree(p.grad0));
+        RELEASE(cudaFree(p.precond0));
+        RELEASE(cudaFree(p.cg0_x));
+        RELEASE(cudaFree(p.cg0_r));
+        RELEASE(cudaFree(p.cg0_z));
+        RELEASE(cudaFree(p.cg0_p));
+        RELEASE(cudaFree(p.cg0_ap));
+        RELEASE(cudaFree(p.q0_prev));
+        RELEASE(cudaFree(p.bc_ep));
+        RELEASE(cudaFree(p.bc_sel));
+        RELEASE(cudaFree(p.bc_stats));
+        RELEASE(cudaFree(p.partial));
+        RELEASE(cudaFree(p.scalars));
+        RELEASE(cudaFree(p.counters));
         for (int e = 0; e < EV_COUNT; e++)
-            cudaEventDestroy(p.ev[e]);
-        cudaStreamDestroy(p.stream);
+            RELEASE(cudaEventDestroy(p.ev[e]));
+        RELEASE(cudaStreamDestroy(p.stream));
     }
-    cudaFree(d->weights);
-    cudaFree(d->bias);
-    cudaFree(d->palette);
-    cudaFree(d->lo1);
-    cudaFree(d->hi1);
-    cudaFree(d->lo0);
-    cudaFree(d->hi0);
-    cudaFree(d->mono0);
-    cudaFree(d->cw);
-    cudaFree(d->mono);
-    cudaFree(d->reduction);
-    cudaFree(d->ls_partial);
-    cudaFree(d->ls_omega);
-    cudaFree(d->obj);
-    cudaFree(d->obj_partial);
-    cudaFree(d->scratch);
-    cudaFree(d->rgb8);
-    cudaFree(d->means);
-    cudaFree(d->cov);
-    cudaFree(d->resid);
-    cudaFreeHost(d->host_scalars);
-    cudaFreeHost(d->host_counters);
-    cudaEventDestroy(d->master_done);
-    cudaEventDestroy(d->block_start);
-    cudaEventDestroy(d->block_end);
-    cudaStreamDestroy(d->master);
+    RELEASE(cudaFree(d->weights));
+    RELEASE(cudaFree(d->bias));
+    RELEASE(cudaFree(d->palette));
+    RELEASE(cudaFree(d->lo1));
+    RELEASE(cudaFree(d->hi1));
+    RELEASE(cudaFree(d->lo0));
+    RELEASE(cudaFree(d->hi0));
+    RELEASE(cudaFree(d->mono0));
+    RELEASE(cudaFree(d->cw));
+    RELEASE(cudaFree(d->mono));
+    RELEASE(cudaFree(d->reduction));
+    RELEASE(cudaFree(d->ls_partial));
+    RELEASE(cudaFree(d->ls_omega));
+    RELEASE(cudaFree(d->obj));
+    RELEASE(cudaFree(d->obj_partial));
+    RELEASE(cudaFree(d->scratch));
+    RELEASE(cudaFree(d->rgb8));
+    RELEASE(cudaFree(d->means));
+    RELEASE(cudaFree(d->cov));
+    RELEASE(cudaFree(d->resid));
+    RELEASE(cudaFreeHost(d->host_scalars));
+    RELEASE(cudaFreeHost(d->host_counters));
+    RELEASE(cudaEventDestroy(d->master_done));
+    RELEASE(cudaEventDestroy(d->block_start));
+    RELEASE(cudaEventDestroy(d->block_end));
+    RELEASE(cudaStreamDestroy(d->master));
+    if (failed > 1)
+        printf("WARNING: %d more CUDA calls failed while releasing the device model\n", failed - 1);
     delete d;
 }
+#undef RELEASE
 
 // ---------------------------------------------------------------------------------------------------------------
 // Level 0

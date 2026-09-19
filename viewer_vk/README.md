@@ -89,7 +89,8 @@ The Direct3D viewer's keys, letter for letter:
 | `Q` / `E` | pitch |
 | `Shift` | a third of the speed, while it is held |
 | `Space` | reset the camera, the raw views, the renormalise flag and the shown texture |
-| `Esc` | quit |
+| `Esc` | quit (with the help page open: close the page only) |
+| `F1` | a help page of every key, below the overlay. Any key closes it and does nothing else, and a movement key that closed it moves nothing until it is released |
 | `C` | the cube rather than the quad |
 | `P` / `B` / `T` | point / bilinear / trilinear filtering |
 | `X` | anisotropic filtering on / off (on by default, `maxAnisotropy` 8; it applies in TRILINEAR mode only, and in the other two the overlay says the flag is remembered and idle). On a device that does not report `samplerAnisotropy` the key says `anisotropy unsupported on this device` and changes nothing, and the overlay reads `Aniso:OFF (unsupported)` |
@@ -101,7 +102,7 @@ The Direct3D viewer's keys, letter for letter:
 | `4` | level 0 from the BC4 / BC5 pack made at load -- which exists only when the file's level 0 is UNCOMPRESSED, and **does nothing** on the block-compressed default |
 | `K` | the decode through `VK_NV_cooperative_vector` or through the plain GLSL matrix multiply, printing `decode: cooperative vectors` or `decode: plain`. On a device without the extension it says why and changes nothing; the overlay reads `Coop:ON`, `Coop:OFF` or `Coop:n-a` |
 | `R` | recompile `view.vert`, `view.frag` and, where the extension is there, `view_coopvec.frag` from beside the executable. A shader that does not compile prints `SHADER ERROR` with `shaderc`'s own line numbers and **both previous pipelines are kept** (they are built into locals and committed only when both succeed) |
-| `3`, `5`-`8` | the shader's spare debug constants, which do nothing in the shaders as they ship |
+| `5`-`8` | the shader's spare debug constants, which do nothing in the shaders as they ship |
 
 Each toggle prints the other viewer's line, in the other viewer's words.
 
@@ -199,8 +200,8 @@ The root CMakeLists builds `nntc_view_vk` wherever `find_package(Vulkan)` finds 
 SDK's `shaderc_combined` on Windows, the distribution's shared `libshaderc` on Linux, with the combined archive as
 the fallback there; without one there is no way to compile a shader at all -- and skips it with a message saying
 which is missing, so a tree with no SDK still configures and still builds the encoder. The reverse holds too:
-a machine with no CUDA compiler skips the encoder and still builds this viewer, which is how it is tested on GPUs from
-other vendors (see the root README's Building section). With the toolkit, and without it, in turn:
+a machine with no CUDA compiler builds the encoder with its CPU backend only and still builds this viewer, which is how
+it is tested on GPUs from other vendors (see the root README's Building section). With the toolkit, and without it, in turn:
 
 ```
 cmake -B build -S . -G "Visual Studio 18 2026" -T cuda=13.4

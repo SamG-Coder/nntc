@@ -22,6 +22,7 @@
 #undef STB_IMAGE_IMPLEMENTATION
 #undef STB_IMAGE_WRITE_IMPLEMENTATION
 #undef STB_IMAGE_RESIZE_IMPLEMENTATION
+#define NNTC_STBIW_DEFINED   // this translation unit holds stb_image_write's definitions; image.h need not declare one
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
@@ -34,12 +35,16 @@
 #include <climits>
 #include <cstdlib>
 #include <filesystem>
+#include <new>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "backend.h"
 #include "image.h"
 #include "model.h"
 #include "nntc_json.h"
@@ -176,11 +181,11 @@ static bool uniform_cw(const Model& m)
 //
 // The probed values are chosen by a fixed linear congruential sequence started from a constant: the check is
 // reproducible run to run and there is no seed to pass.
-static double finite_difference_probe(DeviceModel* d, const Model& m, int k, const std::vector<double>& per_site,
+static double finite_difference_probe(be::Device* d, const Model& m, int k, const std::vector<double>& per_site,
                                       int plane, double h, int samples, double scale)
 {
     std::vector<float> cur;
-    level1_download(d, m, plane, cur);
+    be::level1_download(d, m, plane, cur);
     if (cur.empty() || !(scale > 0.0))
         return 0.0;
     uint64_t state = 0x9E3779B97F4A7C15ull;
@@ -193,11 +198,11 @@ static double finite_difference_probe(DeviceModel* d, const Model& m, int k, con
         const float base = cur[index];
         const float plus = (float)((double)base + h), minus = (float)((double)base - h);
         const double step = (double)plus - (double)minus;
-        level1_poke(d, plane, index, plus);
-        objective_eval(d, m, k, per_site, up);
-        level1_poke(d, plane, index, minus);
-        objective_eval(d, m, k, per_site, down);
-        level1_poke(d, plane, index, base);
+        be::level1_poke(d, plane, index, plus);
+        be::objective_eval(d, m, k, per_site, up);
+        be::level1_poke(d, plane, index, minus);
+        be::objective_eval(d, m, k, per_site, down);
+        be::level1_poke(d, plane, index, base);
         if (!(step > 0.0))
             continue;
         const double derivative = (up.e_plane[(size_t)plane] - down.e_plane[(size_t)plane]) / step;
@@ -324,7 +329,21 @@ static void usage_advanced()
     printf("  --bc-refine-after N  further rounds after level 1 and the decoder are refitted (default 0)\n");
     printf("  --bc-outer N      outer repack passes, each taken only if the shipped E falls (default 2)\n");
     printf("  --device N        the CUDA device                                          (default 0)\n");
-    printf("  --png 0|1         write the recon and source PNGs per level                (default 1)\n");
+    printf("  --backend B       auto|cuda|cpu|check: which backend runs the encode       (default auto)\n");
+    printf("                    auto tries cuda and falls back to cpu with a WARNING naming why; cuda asked for by\n");
+    printf("                    name is an ERROR wherever it cannot be used, rather than quietly something else.\n");
+    printf("                    cpu is a scalar C++ port of the CUDA kernels with std::thread, for machines with no\n");
+    printf("                    NVIDIA GPU: the same algorithm, several times slower. check is the per-kernel\n");
+    printf("                    harness, in a build with both backends: cuda runs the encode and at every call the\n");
+    printf("                    cpu backend is given the same state, run and compared; a summary per function\n");
+    printf("                    ends the run, and any MISMATCH makes the exit status 1\n");
+    printf("  --kcheck-only F   under check, print every call of seam function F, not only the ones not ok\n");
+    printf("  --kcheck-stop     under check, end the run at the first MISMATCH\n");
+    printf("  -j N              the cpu backend's worker threads, 0 = as many as the machine has (default 0)\n");
+    printf("                    0 asks std::thread::hardware_concurrency(), clamped into 1..1024, and a machine that\n");
+    printf("                    cannot answer counts as one; the count is resolved when the pool is built, so the\n");
+    printf("                    number the report prints is the number that ran\n");
+    printf("  --png 0|1         write the recon and source PNGs per level                (default 0)\n");
     printf("  --bc0 both        write the same solve twice: the asset with level 0 block-compressed,\n");
     printf("                    and the PREFIX_u twin (PREFIX_u_nntc.json) with level 0 uncompressed, so\n");
     printf("                    the two decode paths can be compared on one set of planes         (off)\n");
@@ -693,6 +712,32 @@ static bool parse_options(int argc, char** argv, Options& o)
         {
             if (!value_int(i, argc, argv, "--device", o.device))
                 return false;
+            o.device_given = true;
+        }
+        else if (a == "--backend")
+        {
+            if (!need_value(i + 1, argc, "--backend"))
+                return false;
+            o.backend = argv[++i];
+            o.backend_given = true;
+        }
+        else if (a == "--kcheck-only")
+        {
+            if (!need_value(i + 1, argc, "--kcheck-only"))
+                return false;
+            o.kcheck_only = argv[++i];
+        }
+        else if (a == "--kcheck-stop")
+        {
+            o.kcheck_stop = true;
+        }
+        else if (a == "-j")
+        {
+            // value_int and not atoi, for the reason every other number here has: -j 8x is a typed unit and is
+            // refused, where a silent read of 8 would look like a setting.
+            if (!value_int(i, argc, argv, "-j", o.threads))
+                return false;
+            o.threads_given = true;
         }
         else if (a == "--png")
         {
@@ -1424,7 +1469,123 @@ static bool validate_options(Options& o)
         fprintf(stderr, "ERROR: --png %d must be 0 or 1\n", o.png);
         return false;
     }
+    // The backend's NAME is checked here; whether the one named can actually run is a question about the machine and
+    // is answered later, by select_backend, where the fallback lives.
+    if (o.backend != "auto" && o.backend != "cuda" && o.backend != "cpu" && o.backend != "check")
+    {
+        fprintf(stderr, "ERROR: --backend '%s' must be auto, cuda, cpu or check\n", o.backend.c_str());
+        return false;
+    }
+    // 0 is the default and means "as many as the machine has"; a negative count is a typed mistake, and the upper end
+    // is where a thread count stops being a thread count. The clamp itself lives in the dispatcher, which is what
+    // resolves the 0.
+    if (o.threads < 0 || o.threads > 1024)
+    {
+        fprintf(stderr, "ERROR: -j %d must be 0 (as many as the machine has) or a count in 1..1024\n", o.threads);
+        return false;
+    }
     return merge_texture_settings(o);
+}
+
+// WHICH BACKEND RUNS, and what happens when the one asked for cannot (docs/CPU_BACKEND_PLAN.md 2.3).
+//
+// CUDA can be unavailable in five ways: a binary built without the CUDA arm at all, no NVIDIA device, a driver that
+// will not initialise, a --device N past the end, and a device older than the build's compute capability floor. The
+// last four all arrive here as device_select returning false (the last with the device's name and capability left in
+// info, so the message can say which); under `auto` that is a WARNING and a fallback, and under `cuda` or `check` an
+// ERROR, because a caller who demanded a GPU is owed a refusal rather than something else that ran.
+//
+// False means the run is over and the ERROR has already been printed. The chosen backend is handed to the dispatcher
+// before anything touches a device, which is what the six handle-less seam functions read.
+// Why device_select refused: a device that answered but is older than the build's floor, or no device at all.
+static std::string cuda_refusal(const Options& o, const DeviceInfo& info)
+{
+    char why[512];
+    if (info.major > 0)
+        snprintf(why, sizeof(why), "CUDA device %d is '%s', compute capability %d.%d, and this encoder is compiled for "
+                 "8.0 and above", o.device, info.name.c_str(), info.major, info.minor);
+    else if (!info.error.empty())
+        snprintf(why, sizeof(why), "%s", info.error.c_str());
+    else
+        snprintf(why, sizeof(why), "CUDA device %d could not be used", o.device);
+    return why;
+}
+
+static bool select_backend(const Options& o, DeviceInfo& info)
+{
+    // Two flags that belong to the other backend. Neither is a refusal: naming a GPU index and a CPU backend in one
+    // command line is a mistake worth saying out loud and not a reason to throw an encode away.
+    if (o.backend == "cpu" && o.device_given)
+        printf("WARNING: --device %d names a CUDA device and --backend cpu does not use one: the flag is idle\n",
+               o.device);
+    if (o.backend == "cuda" && o.threads_given)
+        printf("WARNING: -j %d is the cpu backend's worker count and --backend cuda does not use it: the flag is "
+               "idle\n", o.threads);
+    if (o.backend != "check" && (!o.kcheck_only.empty() || o.kcheck_stop))
+        printf("WARNING: --kcheck-only and --kcheck-stop belong to --backend check, which this run is not: the flags "
+               "are idle\n");
+
+    // The harness needs both arms at once, so it is asked for the way cuda is: by name, and refused where it cannot
+    // run, never quietly replaced by something else.
+    if (o.backend == "check")
+    {
+        if (!be::cuda_built_in())
+        {
+            fprintf(stderr, "ERROR: --backend check was asked for, but this build has no CUDA backend (it was "
+                            "configured without a CUDA compiler), and the harness compares the two; re-configure "
+                            "with a CUDA 12.8+ toolset\n");
+            return false;
+        }
+        be::backend_select(be::Backend::Check, o.threads);
+        be::check_options(o.kcheck_only, o.kcheck_stop, o.quiet);
+        if (be::device_select(o.device, info))
+            return true;
+        fprintf(stderr, "ERROR: --backend check was asked for, but %s; the harness runs the encode on CUDA\n",
+                cuda_refusal(o, info).c_str());
+        return false;
+    }
+
+    if (o.backend == "cpu")
+    {
+        be::backend_select(be::Backend::Cpu, o.threads);
+        return be::device_select(o.device, info);
+    }
+
+    // auto and cuda both try CUDA, and differ only in what they do when it is not there.
+    if (!be::cuda_built_in())
+    {
+        if (o.backend == "cuda")
+        {
+            fprintf(stderr, "ERROR: --backend cuda was asked for, but this build has no CUDA backend (it was "
+                            "configured without a CUDA compiler); re-configure with a CUDA 12.8+ toolset, or run "
+                            "--backend cpu\n");
+            return false;
+        }
+        printf("WARNING: this build has no CUDA backend (it was configured without a CUDA compiler), so --backend "
+               "auto falls back to cpu\n");
+        be::backend_select(be::Backend::Cpu, o.threads);
+        return be::device_select(o.device, info);
+    }
+
+    be::backend_select(be::Backend::Cuda, o.threads);
+    if (be::device_select(o.device, info))
+        return true;
+
+    const std::string why = cuda_refusal(o, info);
+    info = DeviceInfo();
+    if (o.backend == "cuda")
+    {
+        // Host memory is short for the CPU backend too, so pointing at it would be advice that cannot help.
+        if (why.find("out of host memory") != std::string::npos)
+            fprintf(stderr, "ERROR: --backend cuda was asked for, but %s\n", why.c_str());
+        else
+            fprintf(stderr, "ERROR: --backend cuda was asked for, but %s; run --backend cpu, or --backend auto which "
+                            "falls back to it\n", why.c_str());
+        return false;
+    }
+    printf("WARNING: %s, so --backend auto falls back to cpu\n", why.c_str());
+    be::backend_select(be::Backend::Cpu, o.threads);
+    return be::device_select(o.device, info);
 }
 
 // The banner: the layout, the per-texture settings, the planes, the device and what the loop is about to do. It is
@@ -1497,7 +1658,23 @@ static void print_banner(const Options& o, const Model& m, const DeviceInfo& inf
     for (size_t i = 0; i < m.planes.size(); i++)
         printf("    M%zu  level 0 %dx%d   level 1 %dx%d\n", i, m.planes[i].w0, m.planes[i].h0, m.planes[i].w1,
                m.planes[i].h1);
-    printf("  device %d: %s, compute capability %d.%d\n", o.device, info.name.c_str(), info.major, info.minor);
+    // WHICH BACKEND IS ABOUT TO RUN, on every run and not only on a CPU one, so that a log answers the question
+    // outright rather than by the absence of a line. The CUDA device row below it is exactly the row it always was.
+    printf("  backend: %s\n", be::backend_name(be::backend_selected()));
+    if (be::backend_selected() != be::Backend::Cpu)
+        printf("  device %d: %s, compute capability %d.%d\n", o.device, info.name.c_str(), info.major, info.minor);
+    if (be::backend_selected() == be::Backend::Cpu)
+        printf("  workers: %d of the %u this machine reports, on %s\n", be::backend_threads(),
+               std::thread::hardware_concurrency(), info.name.c_str());
+    else if (be::backend_selected() == be::Backend::Check)
+        printf("  workers: %d of the %u this machine reports, for the cpu side of the harness\n",
+               be::backend_threads(), std::thread::hardware_concurrency());
+    // What the CPU backend is about to take from host memory, said BEFORE it takes it (docs/CPU_BACKEND_PLAN.md
+    // section 1.11): it is a pure function of the layout, and a run that will not fit should say so up front rather
+    // than in the report of a run that never got there. Only on the CPU's rows, so the CUDA banner is the one it was.
+    if (be::backend_selected() != be::Backend::Cuda)
+        printf("  memory : %.1f MB of host memory for the cpu backend's model\n",
+               (double)be::cpu_bytes_for(m) / (1024.0 * 1024.0));
     printf("  sites  : the centre of every pixel of every plane, plus --k %d fixed subtexel positions per pixel\n", o.k);
     printf("           (both levels bilinear there, the target the source read the same way)\n");
     printf("  loop   : up to --rounds %d rounds of (a) the decoder's least squares over every site of every plane,\n",
@@ -1573,8 +1750,31 @@ static void print_banner(const Options& o, const Model& m, const DeviceInfo& inf
     fflush(stdout);
 }
 
-int main(int argc, char** argv)
+// What the encode is doing, for the one message that cannot know it otherwise: main's catch of an exception that
+// escaped, a std::bad_alloc above all. A stage name, not a place in the code; set as each stage begins.
+static const char* g_stage = "reading the options";
+
+static int encode(int argc, char** argv)
 {
+#ifndef NDEBUG
+    printf("DEBUG build\n");   // the first line out, before any argument is read, so the build type is never in doubt
+#endif
+#ifdef NNTC_SANITIZER_SELFTEST
+    // Proof that a sanitizer build is live: one deliberate fault, which the sanitizer must stop before anything else
+    // runs. Defined only on the command line of a throwaway build (-DNNTC_SANITIZER_SELFTEST=N), never in the tree's.
+    {
+        volatile int* a = new int[4];
+        volatile int big = INT_MAX;
+        if (NNTC_SANITIZER_SELFTEST == 1)
+            a[4] = 1;          // one past the end of a heap array: AddressSanitizer
+        if (NNTC_SANITIZER_SELFTEST == 2)
+            a[-1] = 1;         // one before the start: AddressSanitizer
+        if (NNTC_SANITIZER_SELFTEST == 3)
+            big = big + 1;     // signed overflow: UndefinedBehaviorSanitizer
+        printf("sanitizer self-test %d: the fault was NOT caught\n", NNTC_SANITIZER_SELFTEST);
+        delete[] a;
+    }
+#endif
     if (argc < 2)
     {
         usage();
@@ -1592,13 +1792,36 @@ int main(int argc, char** argv)
     const auto t_start = std::chrono::steady_clock::now();
 
     // ---- the source
+    g_stage = "loading the source textures";
     std::vector<Image> tex(o.inputs.size());
     for (size_t t = 0; t < o.inputs.size(); t++)
     {
         bool alpha_ignored = false;
+        // The size bound first, from the header, so an oversized file is refused before its pixels are decoded; and
+        // again after the decode, for a format whose header stb cannot read on its own.
+        int iw = 0, ih = 0;
+        if (image_dimensions(o.inputs[t], iw, ih) && (iw > IMAGE_MAX_DIM || ih > IMAGE_MAX_DIM))
+        {
+            fprintf(stderr, "ERROR: '%s' is %dx%d; the encoder accepts at most %dx%d (IMAGE_MAX_DIM in src/image.h)\n",
+                    o.inputs[t].c_str(), iw, ih, IMAGE_MAX_DIM, IMAGE_MAX_DIM);
+            return 1;
+        }
         if (!image_load_rgb(o.inputs[t], tex[t], alpha_ignored))
         {
+            // stb reports its own allocation failure as a failed read; it is said as what it is.
+            const char* reason = stbi_failure_reason();
+            if (reason && strcmp(reason, "outofmem") == 0)
+            {
+                fprintf(stderr, "ERROR: out of host memory while reading '%s'\n", o.inputs[t].c_str());
+                return 1;
+            }
             fprintf(stderr, "ERROR: cannot read '%s'\n", o.inputs[t].c_str());
+            return 1;
+        }
+        if (tex[t].w > IMAGE_MAX_DIM || tex[t].h > IMAGE_MAX_DIM)
+        {
+            fprintf(stderr, "ERROR: '%s' is %dx%d; the encoder accepts at most %dx%d (IMAGE_MAX_DIM in src/image.h)\n",
+                    o.inputs[t].c_str(), tex[t].w, tex[t].h, IMAGE_MAX_DIM, IMAGE_MAX_DIM);
             return 1;
         }
         // The file carried transparency and the loader dropped it. Said once per file, on stdout beside the other
@@ -1642,6 +1865,7 @@ int main(int argc, char** argv)
         m.cw[c] = (float)(s.weight * s.rgb_weights[c % 3] * 3.0 / rgb_sum);
     }
 
+    g_stage = "building the source chain";
     const int wp = (m.source_width + BLOCK - 1) / BLOCK * BLOCK;
     const int hp = (m.source_height + BLOCK - 1) / BLOCK * BLOCK;
     m.padded = wp != m.source_width || hp != m.source_height;
@@ -1694,13 +1918,12 @@ int main(int argc, char** argv)
     else
         build_level0_palette(m.bits0, m.c0, m.bc0, m.palette0);
 
-    // ---- the device
+    g_stage = "creating the model";
+    // ---- the backend, and then its device. select_backend carries the fallback and has printed whichever line it
+    // chose; one status for every failure, as everywhere else, so a caller tests `if errorlevel 1` and nothing finer.
     DeviceInfo info;
-    if (!device_select(o.device, info))
-    {
-        fprintf(stderr, "ERROR: no CUDA device: no encode\n");
-        return 1;   // one status for every failure: a caller tests `if errorlevel 1` and nothing finer
-    }
+    if (!select_backend(o, info))
+        return 1;
 
     // ---- the banner, the one place the run says what it is about to do. --quiet suppresses it whole, rows and
     // all; the padding warning above it and every warning below it are not part of it and are never suppressed.
@@ -1708,21 +1931,113 @@ int main(int argc, char** argv)
         print_banner(o, m, info);
 
     // ---- the model
-    DeviceModel* d = device_create(m, chain);
+    be::Device* d = be::device_create(m, chain);
     const float luma[3] = { LUMA_R, LUMA_G, LUMA_B };
     const bool init0_residual = m.init0_residual;
-    init_level0(d, m, luma, !init0_residual);
+    g_stage = "initialising the latents";
+    be::init_level0(d, m, luma, !init0_residual);
     Level1InitReport init_rep;
-    init_level1(d, m, o.init == "pca", init_rep);
+    be::init_level1(d, m, o.init == "pca", init_rep);
+
+    // The box init reads source channels 0 .. C1-1 in order, so a grayscale texture (R = G = B) given first would hand
+    // level 1 two or three identical channels: collinear columns in block (a) and a null direction in block (b) that
+    // only rounding settles, and a result that moves by decibels on a last-bit change. So the box init takes the source
+    // channels in their order with every exact copy of an earlier channel moved to the back. Where that picks the same
+    // SET of channels as the plain order (no copy among the first C1, or only copies there because nothing else exists,
+    // as for one grayscale texture) nothing below runs; otherwise the chosen channels' block means are formed here
+    // exactly as k_init_level1_box forms them and replace the device's, on a grid fitted as the init fits it.
+    std::vector<int> box_order, box_copies;   // empty unless the rule changed level 1's channels; the report reads them
+    if (o.init == "box")
+    {
+        const int nout = m.nout;
+        std::vector<int> order, copies;
+        for (int s = 0; s < nout; s++)
+        {
+            bool copy = false;
+            for (int e = 0; e < s && !copy; e++)
+            {
+                bool same = true;
+                for (size_t i = 0; i < chain.size() && same; i++)
+                {
+                    const std::vector<float>& v = chain[i].v;
+                    for (size_t t = 0; t < v.size() / (size_t)nout && same; t++)
+                        same = v[t * nout + s] == v[t * nout + e];
+                }
+                copy = same;
+            }
+            if (copy)
+                copies.push_back(s);
+            else
+                order.push_back(s);
+        }
+        order.insert(order.end(), copies.begin(), copies.end());
+        const int taken = std::min(m.c1, nout);
+        std::vector<int> chosen(order.begin(), order.begin() + taken);
+        std::sort(chosen.begin(), chosen.end());
+        bool plain = true;
+        for (int c = 0; c < taken; c++)
+            plain = plain && chosen[(size_t)c] == c;
+        if (!plain)
+        {
+            for (size_t i = 0; i < m.planes.size(); i++)
+            {
+                const PlaneSize& pl = m.planes[i];
+                const int w0 = pl.w0, h0 = pl.h0, w1 = pl.w1, h1 = pl.h1;
+                std::vector<float> v1((size_t)w1 * h1 * m.c1);
+                for (int y = 0; y < h1; y++)
+                    for (int x = 0; x < w1; x++)
+                    {
+                        int xa = (int)((long long)x * w0 / w1), xb = (int)((long long)(x + 1) * w0 / w1);
+                        int ya = (int)((long long)y * h0 / h1), yb = (int)((long long)(y + 1) * h0 / h1);
+                        xb = std::min(w0, xb <= xa ? xa + 1 : xb);
+                        yb = std::min(h0, yb <= ya ? ya + 1 : yb);
+                        const size_t t1 = (size_t)y * w1 + x;
+                        for (int c = 0; c < m.c1; c++)
+                        {
+                            if (c >= nout)
+                            {
+                                v1[t1 * m.c1 + c] = 0.0f;
+                                continue;
+                            }
+                            const int sc = order[(size_t)c];
+                            float acc = 0.0f;
+                            int n = 0;
+                            for (int sy = ya; sy < yb; sy++)
+                                for (int sx = xa; sx < xb; sx++)
+                                {
+                                    acc += chain[i].v[((size_t)sy * w0 + sx) * nout + sc];
+                                    n++;
+                                }
+                            const float inv = n > 0 ? 1.0f / (float)n : 0.0f;
+                            v1[t1 * m.c1 + c] = 2.0f * acc * inv - 1.0f;
+                        }
+                    }
+                be::level1_upload(d, m, (int)i, v1);
+            }
+            be::quantise_level1(d, m, "minmax");
+            box_order.assign(order.begin(), order.begin() + taken);
+            box_copies = copies;
+            if (!o.quiet)
+            {
+                printf("level 1 init: level 1 takes source channels");
+                for (int c : box_order)
+                    printf(" %d", c);
+                printf("; channel%s", box_copies.size() == 1 ? "" : "s");
+                for (int c : box_copies)
+                    printf(" %d", c);
+                printf(" repeat an earlier channel exactly and are taken only after every distinct one\n");
+            }
+        }
+    }
 
     // Block (a) measures its own step on the quadratic its normal equations already are, and refuses a candidate that
     // raises it: E does not rise across block (a) beyond the tolerance. The shipped ridge is tried first, so a
     // well-conditioned system gets the decoder it always got, bit for bit.
     Objective before, after, after_b, twin;
-    objective_eval(d, m, o.k, mip_site, before);
-    double ms_a = solve_decoder(d, m, o.k, mip_site);
+    be::objective_eval(d, m, o.k, mip_site, before);
+    double ms_a = be::solve_decoder(d, m, o.k, mip_site);
     const double solve_ms = ms_a;
-    objective_eval(d, m, o.k, mip_site, after);
+    be::objective_eval(d, m, o.k, mip_site, after);
 
     // THE RESIDUAL SEED (--init0 residual). Level 0 is still zero everywhere, and the block (a) above therefore fitted
     // the decoder to what level 1 alone can say. The residual of that decode is exactly what a full-resolution latent
@@ -1766,18 +2081,18 @@ int main(int argc, char** argv)
         for (int c = 0; c < m.c0; c++)
         {
             Init0ChannelReport cr;
-            init0_residual_channel(d, m, c, mip_site, cr);
+            be::init0_residual_channel(d, m, c, mip_site, cr);
             Objective seeded;
-            objective_eval(d, m, o.k, mip_site, seeded);
-            ms_a += solve_decoder(d, m, o.k, mip_site);
-            objective_eval(d, m, o.k, mip_site, after);
+            be::objective_eval(d, m, o.k, mip_site, seeded);
+            ms_a += be::solve_decoder(d, m, o.k, mip_site);
+            be::objective_eval(d, m, o.k, mip_site, after);
             const double e_refit = after.e;
             if (!m.l0_bc8)
             {
                 std::vector<Level0Report> l0_seed;
-                ms_c_seed += solve_level0_all(d, m, o.k, o.sweeps, l0_seed);
-                ms_a += solve_decoder(d, m, o.k, mip_site);
-                objective_eval(d, m, o.k, mip_site, after);
+                ms_c_seed += be::solve_level0_all(d, m, o.k, o.sweeps, l0_seed);
+                ms_a += be::solve_decoder(d, m, o.k, mip_site);
+                be::objective_eval(d, m, o.k, mip_site, after);
             }
             init0_rep.push_back(cr);
             init0_e_before.push_back(seeded.e);
@@ -1809,6 +2124,7 @@ int main(int argc, char** argv)
     }
     after_b = after;
 
+    g_stage = "encoding";
     // ---- the round loop
     //
     // Each block is the exact minimiser of E in its own variables with the other two held, so E is non-increasing
@@ -1830,7 +2146,7 @@ int main(int argc, char** argv)
     std::vector<float> lo_before, hi_before, lo_after, hi_after, c_prev, plane_now, lo_p, hi_p;
     std::vector<double> delta_device;
     int dense_planes = 0;
-    level1_range(d, m, 0, lo_before, hi_before);
+    be::level1_range(d, m, 0, lo_before, hi_before);
     lo_after = lo_before;
     hi_after = hi_before;
     std::vector<Level1Report> lr(nplanes), lr0(nplanes);
@@ -1855,9 +2171,9 @@ int main(int argc, char** argv)
         Objective ea, eb, ec;
 
         // (a) the decoder, over every site of every plane.
-        const double round_a = solve_decoder(d, m, o.k, mip_site);
+        const double round_a = be::solve_decoder(d, m, o.k, mip_site);
         ms_a += round_a;
-        objective_eval(d, m, o.k, mip_site, ea);
+        be::objective_eval(d, m, o.k, mip_site, ea);
 
         // (b) level 1, every plane. Until the grid is frozen each plane is the continuous ridged minimiser of its own
         // values; at round --q1-start the one grid the format carries is fitted over the base and every chain plane
@@ -1866,7 +2182,7 @@ int main(int argc, char** argv)
         // sweeps, which cannot.
         if (o.q1_start > 0 && r >= o.q1_start && !frozen)
         {
-            freeze_level1_grid(d, m, o.q1_range);
+            be::freeze_level1_grid(d, m, o.q1_range);
             // Level 0's grid is frozen at the same round and by the same policy, and for the same reason: under
             // --l0 bc8 its plane is continuous too, and the format carries one lo/hi pair per channel for the whole
             // chain. Both snaps happen here, BEFORE block (b) assembles, so the one step of the loop that is a
@@ -1874,7 +2190,7 @@ int main(int argc, char** argv)
             // for both latents and shows up in the same place in the round line.
             if (m.l0_bc8)
             {
-                freeze_level0_grid(d, m, o.q1_range);
+                be::freeze_level0_grid(d, m, o.q1_range);
                 // Both grids come back in the report, so the freeze is progress like the round lines around it and
                 // --quiet drops it with them.
                 if (!o.quiet)
@@ -1913,14 +2229,14 @@ int main(int argc, char** argv)
         {
             c_prev_planes.resize(nplanes);
             for (size_t p = 0; p < nplanes; p++)
-                level1_download(d, m, (int)p, c_prev_planes[p]);
+                be::level1_download(d, m, (int)p, c_prev_planes[p]);
         }
 
         if (frozen)
-            round_b = sweep_level1_all(d, m, o.k, o.ridge, o.q1_sweeps, lr);
+            round_b = be::sweep_level1_all(d, m, o.k, o.ridge, o.q1_sweeps, lr);
         else
         {
-            round_b = solve_level1_all(d, m, o.k, o.ridge, lr);
+            round_b = be::solve_level1_all(d, m, o.k, o.ridge, lr);
             lr_cont = lr[0];
         }
         for (size_t p = 0; p < nplanes; p++)
@@ -1948,15 +2264,15 @@ int main(int argc, char** argv)
         if (o.check && r == 1 && !c_prev_planes.empty())
         {
             Objective plane_e;
-            objective_eval(d, m, o.k, mip_site, plane_e);
+            be::objective_eval(d, m, o.k, mip_site, plane_e);
             fd_done = true;
             for (size_t p = 0; p < nplanes; p++)
             {
                 fd_worst = std::max(fd_worst, finite_difference_probe(d, m, o.k, mip_site, (int)p, fd_h, fd_samples,
                                                                       plane_e.e_plane[p]));
-                level1_delta(d, m, (int)p, delta_device);
+                be::level1_delta(d, m, (int)p, delta_device);
                 std::vector<double> delta_host;
-                if (solve_level1_dense_host(d, m, o.k, (int)p, lr[p].lambda, c_prev_planes[p], delta_host, dense_cap))
+                if (be::solve_level1_dense_host(d, m, o.k, (int)p, lr[p].lambda, c_prev_planes[p], delta_host, dense_cap))
                 {
                     double lo = 1e300, hi = -1e300;
                     for (size_t i = 0; i < delta_host.size() && i < delta_device.size(); i++)
@@ -1974,7 +2290,7 @@ int main(int argc, char** argv)
         ms_b += round_b;
         delta_norm = std::sqrt(delta_norm);
         plane_norm = std::sqrt(plane_norm);
-        objective_eval(d, m, o.k, mip_site, eb);
+        be::objective_eval(d, m, o.k, mip_site, eb);
 
         // The first round's E across block (b) is what the report quotes, so it is kept whether or not --check is on.
         if (r == 1)
@@ -1982,7 +2298,7 @@ int main(int argc, char** argv)
 
         // The device's E against its brute-force host twin, once, after the first round's block (b).
         if (o.check && r == 1)
-            objective_check_host(d, m, o.k, mip_site, twin);
+            be::objective_check_host(d, m, o.k, mip_site, twin);
 
         // (c) level 0, every plane. In the palette mode that is four colour passes of the exact per-texel search,
         // each pass an exact joint step over the texels it moves. Under --l0 bc8 it is block (c') instead: the same
@@ -1992,8 +2308,8 @@ int main(int argc, char** argv)
         double round_c = 0.0;
         if (m.l0_bc8)
         {
-            round_c = frozen ? sweep_level0_cont_all(d, m, o.k, o.ridge, o.q1_sweeps, lr0)
-                             : solve_level0_cont_all(d, m, o.k, o.ridge, lr0);
+            round_c = frozen ? be::sweep_level0_cont_all(d, m, o.k, o.ridge, o.q1_sweeps, lr0)
+                             : be::solve_level0_cont_all(d, m, o.k, o.ridge, lr0);
             for (size_t p = 0; p < nplanes; p++)
             {
                 ms_c_plane[p] += lr0[p].ms_assemble + lr0[p].ms_precond + lr0[p].ms_cg + lr0[p].ms_sweeps;
@@ -2002,7 +2318,7 @@ int main(int argc, char** argv)
         }
         else
         {
-            round_c = solve_level0_all(d, m, o.k, o.sweeps, l0);
+            round_c = be::solve_level0_all(d, m, o.k, o.sweeps, l0);
             for (size_t p = 0; p < nplanes; p++)
             {
                 ms_c_plane[p] += l0[p].ms;
@@ -2010,7 +2326,7 @@ int main(int argc, char** argv)
             }
         }
         ms_c += round_c;
-        objective_eval(d, m, o.k, mip_site, ec);
+        be::objective_eval(d, m, o.k, mip_site, ec);
 
         // Every block is a minimisation, so each of these must be non-increasing to within float rounding. The single
         // exception is block (b) of the round that freezes the grid: snapping the plane onto the grid is a constraint
@@ -2086,7 +2402,7 @@ int main(int argc, char** argv)
     std::vector<Level0Report> l0_final(nplanes);
     if (frozen)
     {
-        const double last_b = sweep_level1_all(d, m, o.k, o.ridge, o.q1_sweeps, lr_final);
+        const double last_b = be::sweep_level1_all(d, m, o.k, o.ridge, o.q1_sweeps, lr_final);
         ms_b += last_b;
         ms_b_sweeps += last_b;
         for (size_t p = 0; p < nplanes; p++)
@@ -2095,31 +2411,31 @@ int main(int argc, char** argv)
     }
     else
     {
-        quantise_level1(d, m, o.q1_range);
+        be::quantise_level1(d, m, o.q1_range);
     }
     std::vector<Level1Report> lr0_final = lr0;
     if (m.l0_bc8)
     {
         if (frozen)
         {
-            const double last_c = sweep_level0_cont_all(d, m, o.k, o.ridge, o.q1_sweeps, lr0_final);
+            const double last_c = be::sweep_level0_cont_all(d, m, o.k, o.ridge, o.q1_sweeps, lr0_final);
             ms_c += last_c;
             for (size_t p = 0; p < nplanes; p++)
                 ms_c_plane[p] += lr0_final[p].ms_assemble + lr0_final[p].ms_sweeps;
         }
         else
-            quantise_level0(d, m, o.q1_range);
+            be::quantise_level0(d, m, o.q1_range);
         lr0 = lr0_final;
     }
     else
     {
-        ms_c += solve_level0_all(d, m, o.k, o.sweeps, l0_final);
+        ms_c += be::solve_level0_all(d, m, o.k, o.sweeps, l0_final);
         for (size_t p = 0; p < nplanes; p++)
             ms_c_plane[p] += l0_final[p].ms;
     }
-    ms_a += solve_decoder(d, m, o.k, mip_site);
+    ms_a += be::solve_decoder(d, m, o.k, mip_site);
     for (size_t i = 0; i < m.planes.size(); i++)
-        level0_download(d, m, (int)i, m.k0[i]);
+        be::level0_download(d, m, (int)i, m.k0[i]);
 
     // ---- THE POST-FIT BC ENCODE (--l0 bc8), THE REFINEMENT OF IT, AND THE OUTER REPACK LOOP.
     //
@@ -2161,7 +2477,7 @@ int main(int argc, char** argv)
     // says a refit cannot raise E had nothing behind it there.
     auto refit_level1 = [&]()
     {
-        const double refit_b = sweep_level1_all(d, m, o.k, o.ridge, o.q1_sweeps, lr_final);
+        const double refit_b = be::sweep_level1_all(d, m, o.k, o.ridge, o.q1_sweeps, lr_final);
         ms_b += refit_b;
         ms_b_sweeps += refit_b;
         for (size_t pi = 0; pi < nplanes; pi++)
@@ -2173,24 +2489,24 @@ int main(int argc, char** argv)
     if (m.l0_bc8)
     {
         Objective probe;
-        objective_eval(d, m, o.k, mip_site, probe);
+        be::objective_eval(d, m, o.k, mip_site, probe);
         e_prepack = probe.e;
         psnr_prepack = mse_to_db(probe.centre_mse);
 
-        ms_pack += bc_pack_prepare(d, m, o.k, true, pack_psnr_seed, pack_texels);
-        objective_eval(d, m, o.k, mip_site, probe);
+        ms_pack += be::bc_pack_prepare(d, m, o.k, true, pack_psnr_seed, pack_texels);
+        be::objective_eval(d, m, o.k, mip_site, probe);
         e_packed = probe.e;
         psnr_packed = mse_to_db(probe.centre_mse);
         pack_psnr = pack_psnr_seed;
 
         std::vector<BcRefineReport> refine_passes;
-        ms_refine += bc_refine(d, m, o.bc_refine, refine_passes, pack_psnr, pack_texels);
-        objective_eval(d, m, o.k, mip_site, probe);
+        ms_refine += be::bc_refine(d, m, o.bc_refine, refine_passes, pack_psnr, pack_texels);
+        be::objective_eval(d, m, o.k, mip_site, probe);
         e_refined = probe.e;
         psnr_refined = mse_to_db(probe.centre_mse);
         refit_level1();
-        ms_a += solve_decoder(d, m, o.k, mip_site);
-        objective_eval(d, m, o.k, mip_site, probe);
+        ms_a += be::solve_decoder(d, m, o.k, mip_site);
+        be::objective_eval(d, m, o.k, mip_site, probe);
         e_refit = probe.e;
         psnr_refit = mse_to_db(probe.centre_mse);
 
@@ -2227,9 +2543,9 @@ int main(int argc, char** argv)
         if (o.bc_refine_after > 0)
         {
             std::vector<BcRefineReport> after_passes;
-            ms_pack += bc_pack_prepare(d, m, o.k, false, pack_psnr, pack_texels);
-            ms_refine += bc_refine(d, m, o.bc_refine_after, after_passes, pack_psnr, pack_texels);
-            objective_eval(d, m, o.k, mip_site, probe);
+            ms_pack += be::bc_pack_prepare(d, m, o.k, false, pack_psnr, pack_texels);
+            ms_refine += be::bc_refine(d, m, o.bc_refine_after, after_passes, pack_psnr, pack_texels);
+            be::objective_eval(d, m, o.k, mip_site, probe);
             if (!o.quiet)
                 printf("level 0 refine: %d further pass%s after the refit: E %.9e psnr %.2f -> E %.9e psnr %.2f\n",
                        o.bc_refine_after, o.bc_refine_after == 1 ? "" : "es", e_refit, psnr_refit, probe.e,
@@ -2253,10 +2569,10 @@ int main(int argc, char** argv)
             std::vector<std::vector<uint8_t>> keep_dev_k0(nplanes), keep_dev_k1(nplanes);
             for (size_t i = 0; i < nplanes; i++)
             {
-                level0_download_values(d, m, (int)i, keep_v0[i]);
-                level0_download(d, m, (int)i, keep_dev_k0[i]);
-                level1_download(d, m, (int)i, keep_v1[i]);
-                level1_download_indices(d, m, (int)i, keep_dev_k1[i]);
+                be::level0_download_values(d, m, (int)i, keep_v0[i]);
+                be::level0_download(d, m, (int)i, keep_dev_k0[i]);
+                be::level1_download(d, m, (int)i, keep_v1[i]);
+                be::level1_download_indices(d, m, (int)i, keep_dev_k1[i]);
             }
             const std::vector<std::vector<uint8_t>> keep_k0 = m.k0, keep_k1 = m.k1;
             const std::vector<std::vector<std::vector<uint8_t>>> keep_blocks = m.bc0_blocks;
@@ -2264,7 +2580,7 @@ int main(int argc, char** argv)
             // endpoints and selectors the device holds, not from the .dds bytes, so the two are saved and put back
             // together and a rejected pass leaves nothing of itself anywhere.
             std::vector<std::vector<uint8_t>> keep_bc_ep, keep_bc_sel;
-            bc_state_save(d, m, keep_bc_ep, keep_bc_sel);
+            be::bc_state_save(d, m, keep_bc_ep, keep_bc_sel);
             const Decoder keep_dec = m.dec;
             const std::vector<float> keep_lo0 = m.lo0, keep_hi0 = m.hi0, keep_lo1 = m.lo1, keep_hi1 = m.hi1;
             const double keep_pack_psnr = pack_psnr;
@@ -2277,7 +2593,7 @@ int main(int argc, char** argv)
 
             // (1) level 1 and the decoder against the PACKED level 0, (2) level 0 continuous again against them.
             double ms_this = refit_level1();
-            const double ms_a_pass = solve_decoder(d, m, o.k, mip_site);
+            const double ms_a_pass = be::solve_decoder(d, m, o.k, mip_site);
             ms_a += ms_a_pass;
             ms_this += ms_a_pass;
             {
@@ -2286,10 +2602,10 @@ int main(int argc, char** argv)
                 // unconstrained solve and snaps onto the grid level 0 already has. What the control path must NOT do
                 // is re-fit the range and snap - that is not a minimisation of E, so the pass would be weighed against
                 // a plane the pass itself moved the grid of.
-                const double ms_c_pass = frozen ? sweep_level0_cont_all(d, m, o.k, o.ridge, o.q1_sweeps, lr0_final)
-                                                : solve_level0_cont_all(d, m, o.k, o.ridge, lr0_final);
+                const double ms_c_pass = frozen ? be::sweep_level0_cont_all(d, m, o.k, o.ridge, o.q1_sweeps, lr0_final)
+                                                : be::solve_level0_cont_all(d, m, o.k, o.ridge, lr0_final);
                 if (!frozen)
-                    snap_level0_on_grid(d, m);
+                    be::snap_level0_on_grid(d, m);
                 ms_c += ms_c_pass;
                 ms_this += ms_c_pass;
                 for (size_t pi = 0; pi < nplanes; pi++)
@@ -2298,20 +2614,20 @@ int main(int argc, char** argv)
                 lr0 = lr0_final;
             }
             for (size_t i = 0; i < nplanes; i++)
-                level0_download(d, m, (int)i, m.k0[i]);
+                be::level0_download(d, m, (int)i, m.k0[i]);
 
             // (3) pack that plane and refine the pack, exactly as the post-fit step did.
             std::vector<BcRefineReport> outer_refine;
-            const double ms_seed = bc_pack_prepare(d, m, o.k, true, pack_psnr_seed, pack_texels);
+            const double ms_seed = be::bc_pack_prepare(d, m, o.k, true, pack_psnr_seed, pack_texels);
             ms_pack += ms_seed;
-            const double ms_ref = bc_refine(d, m, o.bc_refine, outer_refine, pack_psnr, pack_texels);
+            const double ms_ref = be::bc_refine(d, m, o.bc_refine, outer_refine, pack_psnr, pack_texels);
             ms_refine += ms_ref;
             ms_this += ms_seed + ms_ref;
             ms_outer += ms_this;
 
             // (4) the shipped objective decides. It is E of the plane the file holds, which is the only quantity this
             // loop is allowed to improve.
-            objective_eval(d, m, o.k, mip_site, probe);
+            be::objective_eval(d, m, o.k, mip_site, probe);
             if (probe.e < e_ship)
             {
                 if (!o.quiet)
@@ -2329,15 +2645,15 @@ int main(int argc, char** argv)
                        "decoder are restored (%.1f ms)\n", pass, e_ship, probe.e, ms_this);
             for (size_t i = 0; i < nplanes; i++)
             {
-                level0_upload(d, m, (int)i, keep_v0[i]);
-                level0_upload_indices(d, m, (int)i, keep_dev_k0[i]);
-                level1_upload(d, m, (int)i, keep_v1[i]);
-                level1_upload_indices(d, m, (int)i, keep_dev_k1[i]);
+                be::level0_upload(d, m, (int)i, keep_v0[i]);
+                be::level0_upload_indices(d, m, (int)i, keep_dev_k0[i]);
+                be::level1_upload(d, m, (int)i, keep_v1[i]);
+                be::level1_upload_indices(d, m, (int)i, keep_dev_k1[i]);
             }
             m.k0 = keep_k0;
             m.k1 = keep_k1;
             m.bc0_blocks = keep_blocks;
-            bc_state_restore(d, m, keep_bc_ep, keep_bc_sel);
+            be::bc_state_restore(d, m, keep_bc_ep, keep_bc_sel);
             m.dec = keep_dec;
             m.lo0 = keep_lo0;
             m.hi0 = keep_hi0;
@@ -2350,8 +2666,8 @@ int main(int argc, char** argv)
             lr0 = keep_lr0;
             lr_final = keep_lr_final;
             lr0_final = keep_lr0_final;
-            upload_decoder_to_device(d, m);
-            upload_grids_to_device(d, m);
+            be::upload_decoder_to_device(d, m);
+            be::upload_grids_to_device(d, m);
             break;
         }
 
@@ -2368,9 +2684,9 @@ int main(int argc, char** argv)
         // none was accepted - which is what the restore has to have produced - and the "to" number is the E the report
         // prints as `E shipped`. tests/run_checks.py asserts both.
         const double ms_last_b = refit_level1();
-        const double ms_last_a = solve_decoder(d, m, o.k, mip_site);
+        const double ms_last_a = be::solve_decoder(d, m, o.k, mip_site);
         ms_a += ms_last_a;   // refit_level1 has already added its own to ms_b; the line below prints the pair's total
-        objective_eval(d, m, o.k, mip_site, probe);
+        be::objective_eval(d, m, o.k, mip_site, probe);
         if (!o.quiet)
             printf("level 0 final : one more refit of level 1 and the decoder against the packed plane: shipped E "
                    "%.9e psnr %.2f -> E %.9e psnr %.2f (%.1f ms)\n", e_ship, psnr_ship, probe.e,
@@ -2382,12 +2698,12 @@ int main(int argc, char** argv)
     }
 
     for (size_t i = 0; i < m.planes.size(); i++)
-        level1_download_indices(d, m, (int)i, m.k1[i]);
+        be::level1_download_indices(d, m, (int)i, m.k1[i]);
 
     // The plane as the device holds it must be exactly the grid value of every index about to be written.
     std::vector<std::vector<float>> v1_final(m.planes.size());
     for (size_t i = 0; i < m.planes.size(); i++)
-        level1_download(d, m, (int)i, v1_final[i]);
+        be::level1_download(d, m, (int)i, v1_final[i]);
     size_t grid_values = 0, grid_offgrid = 0;
     const bool on_grid = verify_level1_on_grid(m, v1_final, grid_values, grid_offgrid);
     assert(on_grid);
@@ -2396,7 +2712,7 @@ int main(int argc, char** argv)
         fprintf(stderr, "ERROR: %zu of %zu level-1 values are not the grid value of the index beside them; the asset "
                         "would decode to something the encoder never measured\n",
                 grid_offgrid, grid_values);
-        device_destroy(d);
+        be::device_destroy(d);
         return 1;   // one status for every failure, this backstop included
     }
 
@@ -2417,7 +2733,7 @@ int main(int argc, char** argv)
         for (size_t i = 0; i < m.planes.size(); i++)
         {
             level0_plane_values(m, (int)i, true, true, v0);
-            level0_upload(d, m, (int)i, v0);
+            be::level0_upload(d, m, (int)i, v0);
         }
         if (!o.quiet)
             printf("level 0 packed: the report below is of the PACKED plane, decoded back from the blocks the .dds "
@@ -2425,10 +2741,10 @@ int main(int argc, char** argv)
     }
 
     Objective shipped;
-    objective_eval(d, m, o.k, mip_site, shipped);
+    be::objective_eval(d, m, o.k, mip_site, shipped);
 
     std::vector<std::vector<uint8_t>> recon;
-    reconstruct_levels(d, m, recon);
+    be::reconstruct_levels(d, m, recon);
 
     // ---- --diag: the per-plane diagnosis table, of the state the asset is in.
     //
@@ -2496,8 +2812,8 @@ int main(int argc, char** argv)
         std::vector<float> dv0, dv1;
         for (size_t i = 0; i < m.planes.size(); i++)
         {
-            level0_download_values(d, m, (int)i, dv0);
-            level1_download(d, m, (int)i, dv1);
+            be::level0_download_values(d, m, (int)i, dv0);
+            be::level1_download(d, m, (int)i, dv1);
             for (int c = 0; c < m.c0; c++)
             {
                 ChannelStats s;
@@ -2583,19 +2899,17 @@ int main(int argc, char** argv)
         fflush(stdout);
     }
 
-    if (o.png && !write_level_pngs(m, recon, chain, o.prefix))
-    {
-        fprintf(stderr, "ERROR: cannot write the recon / source PNGs\n");
-        device_destroy(d);
-        return 1;
-    }
-
+    g_stage = "writing the asset";
+    // The asset first: it is the deliverable. The PNGs are a viewing aid, so failing to write one is a WARNING and the
+    // run still succeeds.
     size_t sizes[3] = { 0, 0, 0 };
     if (!write_asset(m, o.prefix, o.desc, o.bc0 != 0, sizes, o.quiet))
     {
-        device_destroy(d);
+        be::device_destroy(d);
         return 1;
     }
+    if (o.png && !write_level_pngs(m, recon, chain, o.prefix))
+        printf("WARNING: the recon / source PNGs are incomplete (see above); the asset was written\n");
     // --bc0 both: the same solve written a second time with an uncompressed level 0, so that the block-compressed path
     // and the uncompressed one can be compared on one set of planes. The reported sizes stay those of the shipped asset.
     //
@@ -2610,33 +2924,30 @@ int main(int argc, char** argv)
         for (size_t i = 0; i < m.planes.size(); i++)
         {
             level0_plane_values(m, (int)i, false, false, v0);
-            level0_upload(d, m, (int)i, v0);
+            be::level0_upload(d, m, (int)i, v0);
         }
-        reconstruct_levels(d, m, recon_u);
+        be::reconstruct_levels(d, m, recon_u);
         int worst = 0;
         for (size_t i = 0; i < recon.size() && i < recon_u.size(); i++)
             for (size_t t = 0; t < recon[i].size() && t < recon_u[i].size(); t++)
                 worst = std::max(worst, std::abs((int)recon[i][t] - (int)recon_u[i][t]));
         if (!o.quiet)
             printf("--bc0 both: the uncompressed twin decodes to within %d / 255 of the block-compressed asset over "
-                   "every level (the two formats' own grids differ; PREFIX_u_recon is the twin's own "
-                   "reconstruction)\n", worst);
-        if (o.png && !write_level_pngs(m, recon_u, chain, o.prefix + "_u"))
-        {
-            fprintf(stderr, "ERROR: cannot write the twin's recon / source PNGs\n");
-            device_destroy(d);
-            return 1;
-        }
+                   "every level (the two formats' own grids differ%s)\n", worst,
+                   o.png ? "; PREFIX_u_recon is the twin's own reconstruction" : "");
         size_t other[3] = { 0, 0, 0 };
         if (!write_asset(m, o.prefix + "_u", o.prefix + "_u_nntc.json", false, other, o.quiet))
         {
-            device_destroy(d);
+            be::device_destroy(d);
             return 1;
         }
+        if (o.png && !write_level_pngs(m, recon_u, chain, o.prefix + "_u"))
+            printf("WARNING: the twin's recon / source PNGs are incomplete (see above); the twin's asset was written\n");
     }
-    const size_t device_bytes = device_memory(d);
-    device_destroy(d);
+    const size_t device_bytes = be::device_memory(d);
+    be::device_destroy(d);
 
+    g_stage = "writing the report";
     // ---- the report
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
     // --quiet means quiet: nothing on stdout but the WARNING lines, and nothing on stderr but the ERROR lines (the
@@ -2645,6 +2956,9 @@ int main(int argc, char** argv)
     if (!o.quiet)
     {
         printf("\nreport\n");
+        // The backend again, at the top of the report, for the same reason it is in the banner: a log that is read
+        // without its banner still has to say what produced the numbers under it.
+        printf("  backend      %s\n", be::backend_name(be::backend_selected()));
         for (int t = 0; t < m.textures; t++)
         {
             const double psnr = image_psnr_texture(chain[0], recon[0].data(), m.planes[0].w0, m.nout, t,
@@ -2729,8 +3043,13 @@ int main(int argc, char** argv)
         }
         else
         {
-            printf("  level 1 grid --q1-start 0: fitted over every plane and snapped once at the end, --q1-range %s:",
-                   o.q1_range.c_str());
+            if (o.q1_start == 0)
+                printf("  level 1 grid --q1-start 0: fitted over every plane and snapped once at the end, --q1-range %s:",
+                       o.q1_range.c_str());
+            else
+                printf("  level 1 grid: the loop ended at round %d, before --q1-start %d would have frozen it, so it was "
+                       "fitted over every plane and snapped once at the end, --q1-range %s:",
+                       rounds_used, o.q1_start, o.q1_range.c_str());
             for (int c = 0; c < m.c1; c++)
                 printf("  ch%d [%.4f, %.4f]", c, (double)m.lo1[(size_t)c], (double)m.hi1[(size_t)c]);
             printf("\n");
@@ -2738,8 +3057,12 @@ int main(int argc, char** argv)
         printf("  level 1 on grid: %zu values, every one exactly the grid value of its stored index\n", grid_values);
         if (m.l0_bc8)
         {
-            printf("  level 0 grid frozen at round %d, --q1-range %s over the base and every chain plane, 256 levels:",
-                   frozen_round, o.q1_range.c_str());
+            if (frozen)
+                printf("  level 0 grid frozen at round %d, --q1-range %s over the base and every chain plane, 256 "
+                       "levels:", frozen_round, o.q1_range.c_str());
+            else
+                printf("  level 0 grid fitted and snapped once at the end (the loop ended before any freeze), --q1-range "
+                       "%s over the base and every chain plane, 256 levels:", o.q1_range.c_str());
             for (int c = 0; c < m.c0; c++)
                 printf("  ch%d [%.4f, %.4f]", c, (double)m.lo0[(size_t)c], (double)m.hi0[(size_t)c]);
             printf("\n");
@@ -2843,9 +3166,19 @@ int main(int argc, char** argv)
                 printf(" %.4f", init_rep.peak[c]);
             printf(")\n");
         }
-        else
+        else if (box_order.empty())
         {
             printf(": the block mean of source channel j as channel j\n");
+        }
+        else
+        {
+            printf(": the block means of source channels");
+            for (int c : box_order)
+                printf(" %d", c);
+            printf(" (channel%s", box_copies.size() == 1 ? "" : "s");
+            for (int c : box_copies)
+                printf(" %d", c);
+            printf(" repeat an earlier channel exactly and were taken only after every distinct one)\n");
         }
         printf("  level 1 range");
         for (int c = 0; c < m.c1; c++)
@@ -2937,9 +3270,17 @@ int main(int argc, char** argv)
         }
         printf("  rounds       %d (stopped on %s)\n", rounds_used, stop_reason);
         printf("  time         %.3f s total, (a) %.3f ms / (b) %.3f ms / (c) %.3f ms / E %.3f ms over %lld passes\n",
-               seconds, ms_a, ms_b, ms_c, objective_total_ms(), objective_passes());
-        printf("               the three splits are the blocks' own spans over the whole run, CUDA events around the\n");
-        printf("               whole block: every plane of it, on its own stream, from the first launch to the last.\n");
+               seconds, ms_a, ms_b, ms_c, be::objective_total_ms(), be::objective_passes());
+        if (be::backend_selected() != be::Backend::Cpu)
+        {
+            printf("               the three splits are the blocks' own spans over the whole run, CUDA events around the\n");
+            printf("               whole block: every plane of it, on its own stream, from the first launch to the last.\n");
+        }
+        else
+        {
+            printf("               the three splits are the blocks' own spans over the whole run, the wall clock around\n");
+            printf("               the whole block: every plane of it, walked one at a time, from the first to the last.\n");
+        }
         printf("               The total is the wall clock of the encode, which also carries the E passes, the file\n");
         printf("               I/O and the host's own work. E pass %.3f ms (%.3f ms the first, cold), the init's\n",
                after.ms, before.ms);
@@ -2950,7 +3291,7 @@ int main(int argc, char** argv)
             // the one the same source always produced. A reduced, none or refused is the near-singular arm, and a
             // reader chasing an odd asset should see it without re-running under a debugger.
             long long rung[4];
-            decoder_ridge_tally(rung);
+            be::decoder_ridge_tally(rung);
             printf("  block (a) ridge: %lld standard, %lld reduced, %lld none, %lld refused  (the rung of the ridge\n",
                    rung[0], rung[1], rung[2], rung[3]);
             printf("               ladder each call ended on; anything but all-standard is a near-singular matrix)\n");
@@ -2958,12 +3299,22 @@ int main(int argc, char** argv)
         printf("  device       %.1f MB: the source chain, both latents at every level, and block (b)'s workspace,\n",
                (double)device_bytes / (1024.0 * 1024.0));
         printf("               which every plane owns its own of so that the planes can be solved at the same time\n");
-        // Where blocks (b) and (c) went, plane by plane. Each figure is that plane's own stream, from the first event
-        // of a block to the last, and the planes run TOGETHER: they overlap each other, so their sum is larger than the
-        // block's own span above and only their shape is worth reading. The base's figure is close to the whole block
-        // because it is the plane the block waits on; the chain, a third of the texels, rides along behind it.
-        printf("  per plane    (b) and (c) over the whole run, each plane's own stream, CUDA events. The planes are\n");
-        printf("               issued together, so these overlap and their sum exceeds the block's own time:\n");
+        // Where blocks (b) and (c) went, plane by plane. On CUDA each figure is that plane's own stream, from the first
+        // event of a block to the last, and the planes run TOGETHER: they overlap each other, so their sum is larger
+        // than the block's own span above and only their shape is worth reading. The base's figure is close to the
+        // whole block because it is the plane the block waits on; the chain, a third of the texels, rides along behind
+        // it. The CPU backend walks the planes one at a time, so the same figures SUM to the block instead of
+        // overlapping it, and the percentages below them mean more rather than less.
+        if (be::backend_selected() != be::Backend::Cpu)
+        {
+            printf("  per plane    (b) and (c) over the whole run, each plane's own stream, CUDA events. The planes are\n");
+            printf("               issued together, so these overlap and their sum exceeds the block's own time:\n");
+        }
+        else
+        {
+            printf("  per plane    (b) and (c) over the whole run, each plane's own phases on the wall clock. The\n");
+            printf("               planes are walked one at a time, so these SUM to the block's own time:\n");
+        }
         for (size_t i = 0; i < nplanes; i++)
             printf("    M%zu  %dx%d  (b) %8.3f ms  (c) %8.3f ms\n", i, m.planes[i].w0, m.planes[i].h0, ms_b_plane[i],
                    ms_c_plane[i]);
@@ -2979,5 +3330,48 @@ int main(int argc, char** argv)
         }
     }
 
+    // --backend check: the harness's per-function summary, after every dispatched call the run made (the report's own
+    // included), and a MISMATCH anywhere is the run's failure. Outside check mode this is a quiet true.
+    if (!be::check_finish())
+        return 1;
     return 0;
+}
+
+// Every failure the encoder foresees prints its own ERROR and returns 1. This is the net under the ones it does not: a
+// std::bad_alloc from any of the host's buffers (the source, its padding and chain, the reconstructions - a large
+// enough material on a small enough machine), and anything else the C++ runtime throws, on this thread or carried here
+// from a CPU worker (cpu/pool.h). Without it the runtime terminates the process with no ERROR line at all. What the OS
+// does to a process it kills outright is out of any program's reach.
+//
+// On these paths the CUDA device model and the CPU pool are left for the driver and the OS to reclaim at exit, on
+// purpose: releasing them while unwinding from a failed allocation is more code that can fail, for nothing.
+int main(int argc, char** argv)
+{
+    try
+    {
+        return encode(argc, argv);
+    }
+    catch (const std::length_error&)
+    {
+        fflush(stdout);
+        fprintf(stderr, "ERROR: out of host memory while %s (a buffer larger than the C++ library allows): the "
+                        "material is too large for this machine's memory; try fewer or smaller textures\n", g_stage);
+    }
+    catch (const std::bad_alloc&)
+    {
+        fflush(stdout);
+        fprintf(stderr, "ERROR: out of host memory while %s: the material is too large for this machine's memory; try "
+                        "fewer or smaller textures\n", g_stage);
+    }
+    catch (const std::exception& e)
+    {
+        fflush(stdout);
+        fprintf(stderr, "ERROR: unexpected failure while %s: %s\n", g_stage, e.what());
+    }
+    catch (...)
+    {
+        fflush(stdout);
+        fprintf(stderr, "ERROR: unexpected failure while %s (an unknown exception)\n", g_stage);
+    }
+    return 1;
 }

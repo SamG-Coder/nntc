@@ -34,62 +34,52 @@ if(WIN32)
 endif()
 
 # ---------------------------------------------------------------------------------------------------------------------
-# The encoder, built only where a CUDA compiler is found. CUDA used to be a language of the project itself, which
-# made a machine without the toolkit - an Arm laptop, an AMD or Intel box - fail at configure time before it reached
-# the viewers, the very programs such a machine exists to test. Now the language is probed: with nvcc the encoder is
-# built exactly as before, and without it one status line says so and the rest builds alone (on Linux that is the
-# Vulkan viewer; the Direct3D viewer and bc_check are Windows programs). The
-# assets those machines view are encoded elsewhere; nothing in the encoder or the format changes for this.
+# The encoder. It is ALWAYS built; what a CUDA compiler decides is which BACKEND it carries, not whether the program
+# exists. CUDA used to be a language of the project itself, which made a machine without the toolkit - an Arm laptop,
+# an AMD or Intel box - fail at configure time before it reached the viewers, the very programs such a machine exists
+# to test. Then the language was probed and the encoder was skipped without it. Now the encoder's device interface has
+# two arms behind a dispatcher (docs/CPU_BACKEND_PLAN.md section 1.7), so a machine with no toolkit builds the encoder
+# with the CPU arm alone and a machine with one builds it exactly as before.
+#
+# That CPU-only build is not only for those machines. It is the proof that the dispatch is complete: without nvcc the
+# six .cu files are not compiled, the global symbols they define do not exist, and a call site that still named one
+# would fail to LINK with the linker saying which. A CPU-only build that links clean is a machine-checked statement
+# about the whole host side.
 # ---------------------------------------------------------------------------------------------------------------------
 # The probe cannot tell "this machine has no CUDA" from "the CUDA this command line asked for does not work here":
 # a toolset the generator has no integration for (-T cuda=12.4 under Visual Studio 2026) or a mistyped one comes
 # back NOTFOUND exactly like an Arm laptop does. So when CUDA was asked for by name, a miss is the error it always
 # was, with the toolset in the message, and the silent skip is reserved for a command line that never mentioned CUDA.
 # The probe's answer is also CACHED, NOTFOUND included, so a tree first configured before the toolkit went on the
-# PATH keeps skipping the encoder until the cache entry is cleared; the status line says how.
-include(CheckLanguage)
-check_language(CUDA)
-if(NOT CMAKE_CUDA_COMPILER)
-    if(CMAKE_GENERATOR_TOOLSET MATCHES "cuda=")
-        message(FATAL_ERROR "The CUDA toolset this configure asked for (-T ${CMAKE_GENERATOR_TOOLSET}) was not found or "
-                            "does not work with this generator; the encoder needs a CUDA 12.8+ toolkit the generator "
-                            "has integration for (leave -T out to build the viewers without the encoder)")
-    endif()
-    if(WIN32)
-        set(NNTC_WITHOUT_CUDA "nntc_view, bc_check and nntc_view_vk still build")
-    else()
-        set(NNTC_WITHOUT_CUDA "nntc_view_vk still builds; nntc_view and bc_check are Windows programs")
-    endif()
-    message(WARNING "No CUDA compiler was found: the encoder nntc_encode is skipped (${NNTC_WITHOUT_CUDA}). "
-                    "The encoder needs the CUDA toolkit, 12.8 or newer: on Windows the CUDA installer with its Visual "
-                    "Studio integration, then -T cuda=13.4 (or your version) on the cmake line; on Linux the "
-                    "cuda-toolkit-13-x package from NVIDIA's repository (the distributions' own nvidia-cuda-toolkit "
-                    "is usually too old) with /usr/local/cuda/bin on the PATH. Then re-configure with "
-                    "-UCMAKE_CUDA_COMPILER, since the miss is cached")
-else()
-enable_language(CUDA)
+# PATH keeps building without the CUDA backend until the cache entry is cleared; the warning says how.
 
-# sm_120 needs CUDA 12.8 or newer; the compiled floor is compute capability 8.0.
-if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.8)
-    message(FATAL_ERROR "CUDA ${CMAKE_CUDA_COMPILER_VERSION} cannot target sm_120; configure with a CUDA 12.8+ toolset")
-endif()
-find_package(CUDAToolkit 12.8 REQUIRED)
-
-add_executable(nntc_encode
+# The host sources, which every configure compiles. backend.cpp routes each of the seam's 46 calls to an arm and names
+# no arm's internals; cpu/ is the CPU arm, which is built everywhere because that is what makes a link with no CUDA in
+# it possible at all.
+set(NNTC_HOST_SOURCES
     src/main.cpp
     src/mips.cpp
     src/export.cpp
-    src/init.cu
-    src/solve_decoder.cu
-    src/solve_level1.cu
-    src/solve_level0.cu
-    src/refine_bc.cu
-    src/objective.cu
+    src/backend.cpp
+    src/backend.h
+    src/cpu/cpu_backend.cpp
+    src/cpu/cpu_backend.h
+    src/cpu/cpu_model.cpp
+    src/cpu/cpu_model.h
+    src/cpu/cpu_objective.cpp
+    src/cpu/cpu_init.cpp
+    src/cpu/cpu_solve_decoder.cpp
+    src/cpu/cpu_solve_level1.cpp
+    src/cpu/cpu_solve_level0.cpp
+    src/cpu/cpu_solve_level0.h
+    src/cpu/cpu_refine_bc.cpp
+    src/cpu/cpu_refine_bc.h
+    src/cpu/cpu_constants.h
+    src/cpu/cpu_sample.h
+    src/cpu/pool.h
     src/options.h
     src/image.h
     src/model.h
-    src/sample.cuh
-    src/device.cuh
     # shared/ is what the encoder and both viewers all read: the BC4 / BC5 pack, and the material JSON's reader, which
     # is the same two headers the viewers read the ASSET's JSON with. It started in viewer/, moved to src/ when the
     # encoder gained a reason to parse JSON of its own, and became a directory of its own when the second viewer made
@@ -104,16 +94,94 @@ add_executable(nntc_encode
     src/stb_image_write.h
     src/stb_image_resize2.h)
 
-target_include_directories(nntc_encode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/shared)
-target_link_libraries(nntc_encode PRIVATE CUDA::cudart_static)
+# The CUDA arm: the six kernel files, the two headers they own, and the one host file that names what they define. It
+# is one list per arm on purpose - a third arm is a third list and a third probe, and this one does not move. The
+# per-kernel harness (--backend check) rides with it: it compares the two arms, so it exists only where both do. Its
+# probe (backend_check_probe.cu) is compiled by nvcc because it reads the device model's buffers, but it is not a
+# kernel file: it launches nothing and writes nothing, and the harness alone calls it.
+set(NNTC_CUDA_SOURCES
+    src/init.cu
+    src/solve_decoder.cu
+    src/solve_level1.cu
+    src/solve_level0.cu
+    src/refine_bc.cu
+    src/objective.cu
+    src/sample.cuh
+    src/device.cuh
+    src/cuda_backend.cpp
+    src/cuda_backend.h
+    src/backend_check.cpp
+    src/backend_check.h
+    src/backend_check_probe.cu
+    src/backend_check_probe.h)
 
-# fp32 with the default FMA contraction and deliberately no --use_fast_math: the kernels are expected to agree with a
-# reference evaluation to float rounding.
-set_target_properties(nntc_encode PROPERTIES
-    CUDA_ARCHITECTURES "80;86;89;90;120"
-    CUDA_STANDARD 17
-    CUDA_STANDARD_REQUIRED ON
-    CUDA_SEPARABLE_COMPILATION OFF)
+include(CheckLanguage)
+check_language(CUDA)
+if(NOT CMAKE_CUDA_COMPILER)
+    if(CMAKE_GENERATOR_TOOLSET MATCHES "cuda=")
+        message(FATAL_ERROR "The CUDA toolset this configure asked for (-T ${CMAKE_GENERATOR_TOOLSET}) was not found or "
+                            "does not work with this generator; the encoder's CUDA backend needs a CUDA 12.8+ toolkit "
+                            "the generator has integration for (leave -T out to build without that backend)")
+    endif()
+    if(WIN32)
+        set(NNTC_WITHOUT_CUDA "nntc_view, bc_check and nntc_view_vk still build")
+    else()
+        set(NNTC_WITHOUT_CUDA "nntc_view_vk still builds; nntc_view and bc_check are Windows programs")
+    endif()
+    message(WARNING "No CUDA compiler was found: the encoder nntc_encode is built with its CPU backend only. It "
+                    "encodes, with the same algorithm, several times slower than on an NVIDIA GPU; --backend cuda "
+                    "refuses by name. (${NNTC_WITHOUT_CUDA}.) "
+                    "The CUDA backend needs the CUDA toolkit, 12.8 or newer: on Windows the CUDA installer with its "
+                    "Visual Studio integration, then -T cuda=13.4 (or your version) on the cmake line; on Linux the "
+                    "cuda-toolkit-13-x package from NVIDIA's repository (the distributions' own nvidia-cuda-toolkit "
+                    "is usually too old) with /usr/local/cuda/bin on the PATH. Then re-configure with "
+                    "-UCMAKE_CUDA_COMPILER, since the miss is cached")
+else()
+    enable_language(CUDA)
+
+    # sm_120 needs CUDA 12.8 or newer; the compiled floor is compute capability 8.0.
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.8)
+        message(FATAL_ERROR "CUDA ${CMAKE_CUDA_COMPILER_VERSION} cannot target sm_120; configure with a CUDA 12.8+ "
+                            "toolset")
+    endif()
+    find_package(CUDAToolkit 12.8 REQUIRED)
+endif()
+
+add_executable(nntc_encode ${NNTC_HOST_SOURCES})
+
+target_include_directories(nntc_encode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/shared)
+# The CPU arm is std::thread's, wherever it is built, which is everywhere.
+find_package(Threads REQUIRED)
+target_link_libraries(nntc_encode PRIVATE Threads::Threads)
+
+if(CMAKE_CUDA_COMPILER)
+    # NNTC_CUDA is what compiles the dispatcher's CUDA branch in. It is defined in the same block that adds the .cu
+    # files, so the define and the kernels can never disagree: no nvcc, no kernels, no branch, and then the linker has
+    # something to say about any call site that was missed.
+    target_sources(nntc_encode PRIVATE ${NNTC_CUDA_SOURCES})
+    target_compile_definitions(nntc_encode PRIVATE NNTC_CUDA)
+    target_link_libraries(nntc_encode PRIVATE CUDA::cudart_static)
+
+    # Deliberately no --use_fast_math: the kernels are expected to agree with a reference evaluation to float rounding.
+    set_target_properties(nntc_encode PROPERTIES
+        CUDA_ARCHITECTURES "80;86;89;90;120"
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_SEPARABLE_COMPILATION OFF)
+    # Fused multiply-add. nvcc fuses a * b + c into one fma by default and the C++ compilers here do not (MSVC's
+    # /fp:precise, and -ffp-contract=off on gcc and clang), so with contraction on, the CUDA and CPU backends round the
+    # same expression differently. OFF, the default, compiles the kernels with -fmad=false so both backends round
+    # every multiply and every add separately, which keeps the two as close as the arithmetic allows. ON restores
+    # nvcc's default, which is what every CUDA asset, test and tracked log before this option was made with: build
+    # with -DNNTC_CUDA_FMAD=ON to reproduce them byte for byte. The kernel sources are the same either way; only how
+    # nvcc compiles them changes. The two expressions that must agree host-versus-device (model.h's level1_value and
+    # refine_bc.cu's bc0_value) use __dadd_rn / __dmul_rn explicitly and are unaffected by this option.
+    option(NNTC_CUDA_FMAD "compile the CUDA kernels with nvcc's fused multiply-add contraction (the pre-option default)" OFF)
+    if(NOT NNTC_CUDA_FMAD)
+        target_compile_options(nntc_encode PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-fmad=false>)
+    endif()
+    message(STATUS "nntc_encode: CUDA fused multiply-add ${NNTC_CUDA_FMAD} (NNTC_CUDA_FMAD; ON reproduces the pre-option CUDA assets)")
+endif()
 
 if(MSVC)
     # CUDA::cudart_static is built against the RELEASE static C runtime in both configurations, so the encoder uses that
@@ -138,7 +206,40 @@ endif()
 if(WIN32)
     target_sources(nntc_encode PRIVATE ${NNTC_MANIFEST})
 endif()
-endif()   # the CUDA compiler was found
+
+# The unit exercise of the CPU backend (tests/cpu_check.cpp): the thread pool's contract and the model's transfers
+# proved on their own, before any kernel rests on them, and then every ported kernel run at several thread counts and
+# held to the same bits at each - from the CPU arm's sources alone, so it builds on every configure, and it is the
+# program a ThreadSanitizer build runs threaded (docs/CPU_BACKEND_PLAN.md section 3.4). `nntc_cpu_check --bench`
+# takes stage C1's two measurements. The BC refinement (stage C7) packs through export.cpp's host code as the CUDA arm
+# does, and export.cpp reaches decode_plane through the dispatcher, so the dispatcher and the rest of the CPU arm come
+# too - compiled without NNTC_CUDA, as in the CPU-only configure, so nothing here needs a CUDA toolkit.
+add_executable(nntc_cpu_check tests/cpu_check.cpp src/cpu/cpu_model.cpp src/cpu/cpu_model.h src/cpu/pool.h
+               src/cpu/cpu_constants.h src/cpu/cpu_backend.h src/cpu/cpu_sample.h src/cpu/cpu_objective.cpp
+               src/cpu/cpu_init.cpp src/cpu/cpu_solve_decoder.cpp src/cpu/cpu_solve_level1.cpp
+               src/cpu/cpu_solve_level0.cpp src/cpu/cpu_solve_level0.h src/cpu/cpu_refine_bc.cpp
+               src/cpu/cpu_refine_bc.h src/cpu/cpu_backend.cpp src/backend.cpp src/backend.h src/export.cpp)
+target_include_directories(nntc_cpu_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/shared)
+target_link_libraries(nntc_cpu_check PRIVATE Threads::Threads)
+if(MSVC)
+    set_property(TARGET nntc_cpu_check PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+    target_compile_definitions(nntc_cpu_check PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(nntc_cpu_check PRIVATE /W4)
+else()
+    target_compile_options(nntc_cpu_check PRIVATE -Wall -Wextra -ffp-contract=off)
+endif()
+if(WIN32)
+    target_sources(nntc_cpu_check PRIVATE ${NNTC_MANIFEST})
+endif()
+
+# Which backends this encoder came out with, on one line, so that a configure log answers the question without anyone
+# having to read the warnings above it for an absence. The CPU arm is always there; the CUDA one is the variable.
+if(CMAKE_CUDA_COMPILER)
+    set(NNTC_HAS_CUDA_TEXT " and cuda")
+else()
+    set(NNTC_HAS_CUDA_TEXT "")
+endif()
+message(STATUS "nntc_encode backends: cpu${NNTC_HAS_CUDA_TEXT}")
 
 # ---------------------------------------------------------------------------------------------------------------------
 # The viewer: Direct3D 11, Windows only, plain C++17 with no dependency beyond the C runtime, Win32, d3d11 and d3dcompiler.

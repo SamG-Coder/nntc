@@ -26,15 +26,15 @@ static HWND g_hwnd = nullptr;
 static HINSTANCE g_hinstance = nullptr;
 
 // The translation both ways between Win32's virtual-key codes and the viewer's own. A letter or a digit needs none:
-// Win32 gives those the ASCII code already, which is why the table below names only the seven that differ.
+// Win32 gives those the ASCII code already, which is why the table below names only the eight that differ.
 static const struct { int app, vk; } WIN32_KEY_MAP[] = {
     { KEY_ESCAPE, VK_ESCAPE }, { KEY_SPACE, VK_SPACE }, { KEY_LEFT, VK_LEFT }, { KEY_RIGHT, VK_RIGHT },
-    { KEY_UP, VK_UP }, { KEY_DOWN, VK_DOWN }, { KEY_SHIFT, VK_SHIFT },
+    { KEY_UP, VK_UP }, { KEY_DOWN, VK_DOWN }, { KEY_SHIFT, VK_SHIFT }, { KEY_F1, VK_F1 },
 };
 
 static int win32_to_app_key(int vk) {
     for (const auto& e : WIN32_KEY_MAP) if (e.vk == vk) return e.app;
-    return (vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z') ? vk : 0;
+    return (vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z') ? vk : KEY_OTHER;
 }
 
 static int app_key_to_win32(int key) {
@@ -48,6 +48,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // The size is not acted on here: a swapchain cannot be recreated from inside the window procedure while the
         // frame loop may be halfway through a frame, so the message only raises a flag the loop reads.
         case WM_SIZE: if (wp != SIZE_MINIMIZED) g_resized = true; return 0;
+        case WM_SYSKEYDOWN:   // Alt and F10 arrive here: they close the help page too, and otherwise go to DefWindowProc as before
+            if (!g_shot && app_help_open() && !(lp & (1 << 30))) { app_key_struck(win32_to_app_key((int)wp)); return 0; }
+            break;
         case WM_KEYDOWN:
             if (g_shot) return 0;   // the shot frame is a function of the command line, so a keystroke changes nothing
             if (lp & (1 << 30)) return 0;   // a repeat of a key already down is not a fresh press

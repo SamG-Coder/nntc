@@ -22,7 +22,8 @@ A Prior Art Disclosure, dated September 13, 2026 is [here](https://github.com/ri
 
 * **Input**: one to six 24-bit RGB images of the same size (PNG, JPEG, TGA, BMP and the other formats `stb_image`
   reads), named on the command line or in a material JSON. An alpha channel is ignored, with a warning: the tool
-  encodes RGB only. Sizes should be divisible by 4; others are padded with a warning.
+  encodes RGB only. Sizes should be divisible by 4; others are padded with a warning. At most 16384 x 16384: a larger
+  input is refused (`IMAGE_MAX_DIM` in `src/image.h` sets the bound).
 * **Default layout**: `--c0 2 --c1 4`: latent 0 has two channels at full resolution (one BC5 texture), latent 1 has
   four channels at a quarter resolution (an 8-bit RGBA texture); 10 bits per pixel at the base for the whole material,
   13.3 with mipmaps. Latent 1 is always stored at 8 bits per channel in the `.dds`.
@@ -41,20 +42,36 @@ A Prior Art Disclosure, dated September 13, 2026 is [here](https://github.com/ri
   1.3 s for four 512x512 textures at the default layout (`out/disclosure/log_m1234_default.txt`), 5.47 s for one
   2888x4320 image at `--l0 palette --c0 1 --bits0 4 --c1 2` (`out/s7/cmp/log_model34_c1b4_c2b8.txt`), 15.2 s for four
   2048x1024 textures at `--c0 4 --c1 4` (`out/timing/log_md1234_c4c4.txt`). Larger inputs take longer: four 4096x4096
-  textures run on the order of a minute (seen during development). The encoder tool currently only supports CUDA; without
-  an NVIDIA GPU it does not encode, however the assets it writes decodes on any GPU (using plain pixel shaders).
+  textures run on the order of a minute (seen during development). **Without an NVIDIA GPU the encoder still works**: it
+  falls back to a CPU backend, a scalar C++ port of the CUDA kernels using every core, with the same algorithm. It is
+  slower - measured 8 to 14 times the RTX 5090's time on real inputs with 32 threads, for example 24 s against 2.8 s for
+  a 1024x1024 image. Across a 20-case test corpus, 17 CPU encodes came out byte-identical to the CUDA backend's and the
+  mean PSNR difference was -0.06 dB. The rest differ the way the encoder differs from itself under a rounding change:
+  it is path-dependent, so a last-bit difference can settle it in a different optimum, and on the hardest material
+  tested (four channels in each latent) that was up to about a decibel on a texture. The assets decode on any GPU either
+  way (using plain pixel shaders).
 * **Encode Quality**: The encoder fits the output for the hardware filter, not for texel by texel decoding, so the method is compatible with standard bilinear, trilinear and anisotropic sampling. `docs/RESULTS.md` has the measurements.
 
 ## Building
 
-You need CMake, a C++17 compiler and, for the encoder, the CUDA toolkit. CUDA 12.8 or newer is the minimum the
-build accepts; 13.4 (VS 2026) and 13.3 (WSL) are what this tree is built and gated with.
+You need CMake and a C++17 compiler. The CUDA toolkit is optional: it adds the encoder's GPU backend. CUDA 12.8 or
+newer is the minimum the build accepts; 13.4 (VS 2026) and 13.3 (WSL) are what this tree is built and gated with.
 
-**CUDA is optional for the viewers.** CMake probes for a CUDA compiler: with one, the encoder is built; without one it
-prints `-- No CUDA compiler was found: the encoder nntc_encode is skipped` and builds the rest alone -- on Windows
-both viewers and `bc_check`, on Linux the Vulkan viewer (the Direct3D viewer and `bc_check` are Windows programs) --
-so an Arm laptop or an AMD or Intel box can build and run the viewer on assets encoded elsewhere (the `examples/`
-directory ships several; `build/nntc_view_vk examples/pavingstones141_1k_c0_4_nntc.json` opens one). The release gate needs the encoder and does not run on such a machine.
+**CUDA is optional.** CMake probes for a CUDA compiler. With one, the encoder is built with both backends, CUDA and CPU,
+and uses the GPU. Without one it prints a CMake Warning, `No CUDA compiler was found: the encoder nntc_encode is built
+with its CPU backend only`, and builds everything else as usual -- on Windows both viewers and `bc_check`, on Linux the
+Vulkan viewer (the Direct3D viewer and `bc_check` are Windows programs). So an Arm laptop or an AMD or Intel box can
+encode, slower, and view (the `examples/` directory ships several assets; `build/nntc_view_vk
+examples/pavingstones141_1k_c0_4_nntc.json` opens one). The release gate runs on such a machine too.
+
+**Choosing the backend.** `--backend auto`, the default, uses CUDA when it can and otherwise falls back to the CPU with
+a WARNING saying why (no CUDA in the build, no NVIDIA device, a driver that will not start, or a GPU older than
+compute capability 8.0, which the WARNING names). `--backend cpu` forces the
+CPU. `--backend cuda` asked for by name is an ERROR when CUDA cannot be used, rather than quietly something else. `-j N`
+sets the CPU backend's threads; the default uses every core, and the result is byte-identical at any thread count. The
+report names the backend that ran. CMake's `NNTC_CUDA_FMAD` option, OFF by default, compiles the CUDA kernels without
+fused multiply-add so that they round the way the C++ side does; `-DNNTC_CUDA_FMAD=ON` reproduces assets made before the
+option existed byte for byte.
 
 ### Windows
 
@@ -98,7 +115,7 @@ package to install; the ones a Linux box can meet:
 
 | the warning says | what is missing | install (Debian / Ubuntu) |
 | --- | --- | --- |
-| `No CUDA compiler was found: the encoder nntc_encode is skipped` | the CUDA toolkit; expected on any box without an NVIDIA card | nothing, unless you want the encoder: NVIDIA's `cuda-toolkit-13-x`, then `cmake -UCMAKE_CUDA_COMPILER` |
+| `No CUDA compiler was found: the encoder nntc_encode is built with its CPU backend only` | the CUDA toolkit; expected on any box without an NVIDIA card | nothing: the encoder works on the CPU, slower. For the GPU backend, NVIDIA's `cuda-toolkit-13-x`, then `cmake -UCMAKE_CUDA_COMPILER` |
 | `Vulkan was not found: the target nntc_view_vk is skipped` | the Vulkan loader's headers and library | `libvulkan-dev` |
 | `No shaderc was found ...: nntc_view_vk is skipped` | the run-time GLSL compiler's library and header | `libshaderc-dev` |
 | `GLFW was not found: nntc_view_vk builds HEADLESS` | the window library; only `--shot` runs without it | `libglfw3-dev` |
@@ -113,8 +130,8 @@ and no desktop. `nntc_view`, the Direct3D 11 viewer, is Windows only. Verified u
 gcc 13.3, CUDA 13.3 from NVIDIA's `wsl-ubuntu` apt repository): the gate passes and the asset it writes is
 byte-identical to the Windows build's -- on the default source chain.
 
-The packages, by distribution family. The encoder needs the CUDA toolkit on top of these; without `nvcc` the
-configure skips it and builds the viewer alone.
+The packages, by distribution family. The encoder's GPU backend needs the CUDA toolkit on top of these; without
+`nvcc` the configure builds the encoder with its CPU backend only, and the viewer.
 
 | | packages |
 | --- | --- |
@@ -154,8 +171,9 @@ in the last bit between platforms, so those runs agree across platforms in PSNR 
 (`docs/DESIGN.md` section 6 has the measurement). Inside WSL, prefer the `cuda-toolkit-13-x` package: the `cuda` and
 `cuda-drivers` metapackages try to install a Linux driver, which WSL does not use (the driver is Windows'). Put
 `/usr/local/cuda-13.x/bin` on your PATH yourself, and do it BEFORE the first configure: with `nvcc` off the PATH the
-build does not refuse, it skips the encoder, and the probe's answer is cached, so a tree configured too early keeps
-skipping it until you re-configure with `-UCMAKE_CUDA_COMPILER` (or delete the build directory).
+build does not refuse, it builds the encoder with its CPU backend only, and the probe's answer is cached, so a tree
+configured too early keeps building it without CUDA until you re-configure with `-UCMAKE_CUDA_COMPILER` (or delete the
+build directory).
 
 ## Encoding
 
@@ -170,6 +188,7 @@ nntc_encode a.png -o out/name.json                          -> the descriptor is
 nntc_encode me1.png me2.png me3.png me4.png --c0 3          -> 3 channels on latent 0, a BC5 and a BC4 (a harder material)
 nntc_encode me1.png me2.png me3.png me4.png me5.png --c0 4  -> 4 channels on latent 0, two BC5s (a harder material still)
 nntc_encode albedo.png --rounds 60                          -> Use more encoding rounds for higher quality (slower)
+nntc_encode albedo.png --backend cpu                        -> encode on the CPU even where an NVIDIA GPU is present
 ```
 
 The tree also carries two small source-material examples under `examples/`, with their source PNGs and precompressed
@@ -183,8 +202,8 @@ build\Release\nntc_view.exe examples\pavingstones141_1k_c0_4_nntc.json
 To recompress those examples from the source JSONs:
 
 ```bat
-build\Release\nntc_encode.exe examples\m1_m4_source_material.json -o out\examples\m1_m4_c0_3_c1_4.json --c0 3 --c1 4 --png 0
-build\Release\nntc_encode.exe examples\pavingstones141_1k_source_material.json -o out\examples\pavingstones141_1k_c0_4.json --c0 4 --png 0
+build\Release\nntc_encode.exe examples\m1_m4_source_material.json -o out\examples\m1_m4_c0_3_c1_4.json --c0 3 --c1 4
+build\Release\nntc_encode.exe examples\pavingstones141_1k_source_material.json -o out\examples\pavingstones141_1k_c0_4.json --c0 4
 ```
 
 and then view those freshly written assets:
@@ -220,12 +239,19 @@ every texture takes the default. There is no single-value broadcast (`--bits0` h
 
 `--help` lists the everyday options, `--help-advanced` the solver's. `--diag` prints a per-texture, per-mip
 diagnosis table before the report, and with it the range of every source level, which is where the chain's clamp is
-visible. `--quiet` prints nothing but the warnings and the errors: no banner, no progress, no `wrote` lines and no
-report; the asset and its descriptor are the account of what the run produced. `--png 1` (the default) writes both the decoded and the
+visible. `--quiet` prints nothing but the warnings and the errors (a Debug build still prints `DEBUG build` first):
+no banner, no progress, no `wrote` lines and no report; the asset and its descriptor are the account of what the run produced. `--png 1` writes both the decoded and the
 source PNGs per texture per mip level (`_recon_` and `_src_`; with two or more textures the names carry `_t<n>_`);
-`--png 0` skips them.
+`--png 0`, the default, skips them. The asset is written first, so a PNG that cannot be written is a WARNING, not a
+failed run. PNGs an earlier `--png 1` run wrote under the same prefix are not removed, so compare against them only if
+they came from the same run.
 
-`nntc_encode` returns 0 on success and 1 on any error.
+`nntc_encode` returns 0 on success and 1 on any error. Every failure is one `ERROR:` line on stderr, including running
+out of memory: out of GPU memory names the allocation, what is already allocated and the GPU's free memory (there is
+no fallback to the CPU: re-run with `--backend cpu` or a smaller material), and out of host memory names the stage.
+On Windows the display driver may let the GPU model grow past the card's memory into system memory, slowly, before the
+out-of-GPU-memory ERROR appears. A fallback that lets the run continue, such as `--backend auto` moving to the CPU, is a
+`WARNING:` on stdout that says why.
 
 ### The source mip chain, and the material JSON
 
@@ -313,28 +339,29 @@ interchangeable on every GPU.
 
 | | **A. sampler LOD bias** (NVIDIA / AMD) | **B. scaled gradients** (Intel / generic; what the viewers ship) |
 | --- | --- | --- |
-| how | level 1's sampler carries `MipLODBias` / `mipLodBias` = `lod_bias_level1` (+2); the shader uses a plain `Sample` / `texture` | the shader samples level 1 with `SampleGrad` / `textureGrad`, both UV derivatives multiplied by `2^lod_bias_level1` (4); no sampler bias |
+| how | level 1's sampler carries `MipLODBias` / `mipLodBias` = `lod_bias_level1` (+2); the shader uses a plain `Sample` / `texture` | the shader samples both latents with `SampleGrad` / `textureGrad`: level 0 with the pixel's own UV derivatives, level 1 with them multiplied by `2^lod_bias_level1` (4); no sampler bias |
 | cost | one sampler-state field, nothing in the shader | explicit-gradient sampling, which some hardware runs a little slower than a plain sample |
 | mip selection | correct on NVIDIA and AMD. **Wrong on Intel integrated graphics**: a magnified texture comes out very blurry (seen on a 13th-generation Core i7 under Direct3D 11 and Vulkan; the base LOD of a magnified texture seems not to go negative there, so +2 lands on mip 2 instead of clamping back to mip 0) | correct on NVIDIA, AMD and Intel: the +2 is inside the LOD the hardware computes, before any clamp |
 | trilinear / bilinear / point | the reference | the same mips and the same picture as A (measured byte-identical on an integrated Radeon and within rounding on an RTX 5090) |
 | anisotropic | the better picture: the bias moves the LOD and leaves the line the anisotropic taps are spread along at its true length | somewhat blurrier on oblique surfaces: scaling both gradients also makes that tap line 4 times longer. Measured against a 16x-supersampled reference on close, steeply angled views, A was ahead by 3 to 7 dB on both an RTX 5090 and an integrated Radeon; square-on, or with anisotropy off, there is no difference |
 
-**How much anisotropy level 1 gets under B is up to the driver.** Level 0 is a plain sample and always gets the
-hardware's full anisotropic filter. Level 1, read through explicit gradients, has been seen to behave two ways. On
-NVIDIA and AMD it is filtered anisotropically with the tap line 4 times too long (the row above), and on Intel
-integrated graphics (a 13th-generation Core i7) toggling anisotropy visibly changes level 1 as well, so it is
-filtered anisotropically there too (seen by eye, not measured against a reference). On Mesa's lavapipe, the CPU
-Vulkan driver, explicit-gradient samples get no anisotropy at all, only trilinear filtering, so toggling anisotropy
-changes level 0 and leaves level 1 byte-identical (the specification allows this, and some mobile GPUs may do the
-same). None of these is a wrong picture. Level 1 is the
-smooth, slowly varying latent, so what it loses at grazing angles costs little, and method A is the one that gives
-it the full anisotropic filter.
+**Both latents go through the same gradient path (v1.3.5).** An implicit-derivative sample (`Sample` / `texture`)
+and an explicit-gradient one (`SampleGrad` / `textureGrad`) are allowed to be filtered differently, and Mesa's
+llvmpipe (lavapipe) does: when level 0 was a plain sample beside level 1's `textureGrad`, it gave level 0 anisotropic
+filtering and level 1 none, and even with anisotropy off it chose slightly different LODs on the two paths, so the
+decoder was combining two latents filtered in different ways. The real GPUs tested happened to agree; nothing
+promised it. So the viewers now read level 0 through `SampleGrad` / `textureGrad` too, with the pixel's own
+derivatives, and every implementation filters the two latents alike. On an RTX 5090 and an integrated Radeon, under
+Direct3D 11 and Vulkan, every frame is byte-identical to before; on llvmpipe, toggling anisotropy now changes neither
+latent. How much anisotropy the gradient path gets is up to the driver: NVIDIA, AMD and Intel integrated graphics
+apply it (level 1's tap line 4 times too long, the row above), llvmpipe applies none. llvmpipe is a slow software
+renderer and matters only for testing.
 
 **A refinement of B, documented and not shipped.** B's extra blur under anisotropic filtering comes from scaling
 both gradients. Scaling only the footprint's SHORT axis by 4 raises the LOD by the same 2 levels and leaves the line
 the anisotropic taps are spread along at its true length. `ddx(uv)` and `ddy(uv)` are not that ellipse's axes, so
-the shader has to find them first (the closed-form 2x2 eigen-decomposition of the UV Jacobian, about ten
-instructions), scale the short one, and pass the two axis vectors to `SampleGrad`. It also has to know the
+the shader has to find them first (the Jacobian's singular vectors: the closed-form eigen-decomposition of `J^T J` for the 2x2 UV
+Jacobian `J`, about ten instructions), scale the short one, and pass the two axis vectors to `SampleGrad`. It also has to know the
 sampler's maximum anisotropy `A`, because the hardware's LOD is `log2(max(short, long / A))` and it is that whole
 quantity which must rise by 2: with `A` wrong the result is worse than the plain scale (measured), so it is more
 fragile than it looks. Measured here it matches the bias or edges it by up to 2 dB. The viewers keep the two-line form
@@ -360,14 +387,15 @@ The D3D 11 viewer has also been successfully tested on Windows ARM, Snapdragon X
 
 **If you write your own consumer**, the one thing to get right: **the quarter-resolution texture must be sampled with
 its UV gradients scaled by `2^lod_bias_level1` = 4** (`SampleGrad` / `textureGrad`), so that both textures are read
-from the same mip; a sampler LOD bias of the same value selects the same mips on hardware that keeps a negative base LOD under magnification (NVIDIA, AMD) and is the sharper picture there under anisotropic filtering, but was observed to blur a magnified picture badly on Intel Xe integrated graphics, so the gradient form is the one to ship. Everything else is
+from the same mip, and the full-resolution one through `SampleGrad` / `textureGrad` as well, with the unscaled
+gradients, so that the two are filtered the same way; a sampler LOD bias of the same value selects the same mips on hardware that keeps a negative base LOD under magnification (NVIDIA, AMD) and is the sharper picture there under anisotropic filtering, but was observed to blur a magnified picture badly on Intel Xe integrated graphics, so the gradient form is the one to ship. Everything else is
 `lo + sample * (hi - lo)` on each channel, then `out = W * [c, s, s*c] + b`. `docs/FORMAT.md` specifies the files byte
 by byte, and `tools/dds_decode.py` is a reference decoder of about 500 lines in Python.
 
 ## Checking an asset
 
 ```
-python tools\dds_decode.py out\albedo --ref out\albedo_recon    independent decode, max |diff| against the encoder's PNGs
+python tools\dds_decode.py out\albedo --ref out\albedo_recon    independent decode, max |diff| against the encoder's PNGs (so --png 1)
 python tools\dds_decode.py out\albedo --psnr-levels             the encoder's psnr and mip psnr lines, reproduced (needs the run's _src_ PNGs, so --png 1)
 python tools\dds_decode.py out\albedo --grid                    the published ranges match what a sampler returns
 build\Release\bc_check.exe out\albedo_nntc.json                 the BC blocks against iOrange's bcdec
@@ -460,7 +488,8 @@ the method, `docs/MATHEMATICS.md` the notes for whoever changes it, `PRIOR_ART_D
 * RGB only; an image's alpha channel is ignored, with a warning naming the file.
 * At most six textures per material. The layout does not grow with the count: six textures share the same two latent
   planes (two or three `.dds` textures) as four do, so more textures means fewer bits per texture.
-* Encoding needs an NVIDIA GPU (compute capability 8.0 or newer). Decoding does not.
+* Encoding is fastest on an NVIDIA GPU (compute capability 8.0 or newer); without one the encoder runs on the CPU,
+  measured 8 to 14 times slower on 32 threads. Decoding needs neither.
 * No entropy coding: an asset's size is fixed by its layout.
 * The encoder never deletes a file or a directory. A run leaves any stale sibling under its prefix alone; the
   descriptor names the files that belong to the asset.

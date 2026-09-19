@@ -67,15 +67,18 @@ void DecodeNNTC(float4 z0, float4 z1, out float outv[18])
 float4 PSMain(VSOutput input) : SV_Target
 {
     // Two standard mipmapped texture samples (three when level 0 is in two files and t2 is bound): what a game does.
-    float4 s0 = lat0.Sample(samp, input.uv);   // the uncompressed level 0, or a BC4 / BC5 (its channels in .rg, the same sampler)
-    if (sel.z == 2) s0.zw = lat0b.Sample(samp, input.uv).rg;   // channels 2-3 from the second texture; at C0 3 it is a BC4 and only .r (channel 2) is read below
+    // Both latents are read through the same explicit-gradient path, so every implementation filters them alike
+    // (an implicit Sample beside a SampleGrad may not be: llvmpipe gives only the implicit one anisotropy).
+    const float2 dx = ddx(input.uv), dy = ddy(input.uv);
+    float4 s0 = lat0.SampleGrad(samp, input.uv, dx, dy);   // the uncompressed level 0, or a BC4 / BC5 (its channels in .rg, the same sampler)
+    if (sel.z == 2) s0.zw = lat0b.SampleGrad(samp, input.uv, dx, dy).rg;   // channels 2-3 from the second texture; at C0 3 it is a BC4 and only .r (channel 2) is read below
     // Level 1 is a quarter of level 0's size, so left alone the GPU reads it two mips finer than level 0. The encoder
     // pairs mip m of level 1 with mip m of level 0, so its UV gradients are scaled by const0.z = 2^lod_bias_level1
     // (4; 1.0 when key L turns the rule off) to keep the two in step.
     // Gradients rather than a sampler LOD bias of +2: the bias is fine on NVIDIA and AMD but blurs a magnified
     // texture badly on Intel integrated graphics; scaled gradients work on all three. README.md, "The two ways to
     // apply the level-1 mip shift", compares the two methods.
-    float4 s1 = lat1.SampleGrad(samp1, input.uv, ddx(input.uv) * const0.z, ddy(input.uv) * const0.z);
+    float4 s1 = lat1.SampleGrad(samp1, input.uv, dx * const0.z, dy * const0.z);
     if (const0.x > 0.5) return float4(s0.rgb, 1.0);   // key 1: level 0's texture as stored (its channels as RGB)
     if (const0.y > 0.5) return float4(s1.rgb, 1.0);   // key 2: level 1's
     float4 z0 = lo0 + s0 * (hi0 - lo0);   // the dequantisation AFTER sampling (affine, so the blend of samples is the blend of values)

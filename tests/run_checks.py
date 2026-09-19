@@ -1,11 +1,23 @@
 """The release gate.
 
-It builds nothing. It encodes tests/tiny.png with an already-built nntc_encode, decodes the asset again with the
-independent Python reader, checks the objective against its own brute-force twin, packs level 0 with bc_check and
-greps the tree for the things that must never appear in it.
-    python tests/run_checks.py [--build-dir DIR]
+It first re-hashes the kernel files against tests/kernel_hashes.txt. Then it encodes tests/tiny.png with an
+already-built nntc_encode, decodes the asset again with the independent Python reader, checks the objective against
+its own brute-force twin, packs level 0 with bc_check and greps the tree for the things that must never appear in it.
+Last, it configures and builds nntc_encode a second time with the CUDA compiler hidden, under out/, which is the one
+thing the gate builds (cpu_only_build_check says why).
+    python tests/run_checks.py [--build-dir DIR] [--backend cpu] [--cross-examples]
+
+--backend cpu runs the same gate against the encoder's CPU backend (docs/CPU_BACKEND_PLAN.md section 7.2): every
+nntc_encode invocation - and only those - gets `--backend cpu` appended, every assertion stays as written, and the run
+writes under out_cpu/ instead of out/, so that a CPU run never overwrites the assets of a CUDA one (section 7.1).
+
+The CPU backend's own arms (section 7): the thread-count arm, byte-identical results at -j1 and at the default count
+(every gate); the cross-backend arm, the same inputs through both backends judged on the PSNR distribution (the
+default run, where the build and the machine have both backends; --cross-examples adds the two examples/ materials);
+and the ThreadSanitizer arm, last, on Linux only.
 """
 
+import hashlib
 import io
 import json
 import os
@@ -54,6 +66,13 @@ SEARCHED_FILES = ['README.md', 'CMakeLists.txt', 'LICENSE', 'PRIOR_ART_DISCLOSUR
 # What the run reports at the end: one row per gate, in the order they were reached.
 SUMMARY = []
 
+# The encoder backend the run asks for, appended to every nntc_encode command line by run(); None leaves the encoder's
+# own default. And the directory every check writes under: out/ for the default run, out_cpu/ for --backend cpu, so the
+# two runs' assets sit side by side instead of the second overwriting the first. main() sets both from the command line
+# before any check runs.
+BACKEND = None
+OUT = 'out'
+
 
 def record(gate, detail):
     SUMMARY.append((gate, detail))
@@ -64,9 +83,10 @@ def out_asset(name, source='tiny'):
 
     -o NAME, with no extension and no file of that name, is a DIRECTORY and is created (nntc_encode --help), so the
     asset inside it takes the input's own base name: `-o out/tiny_bc` writes out/tiny_bc/tiny_lat0.dds and the rest.
-    Every check names its own directory under out/, which also keeps one case's files away from another's.
+    Every check names its own directory under out/ (out_cpu/ under --backend cpu), which also keeps one case's files
+    away from another's.
     """
-    return os.path.join('out', name), os.path.join('out', name, source)
+    return os.path.join(OUT, name), os.path.join(OUT, name, source)
 
 
 def executable(build_dir, name):
@@ -78,7 +98,17 @@ def executable(build_dir, name):
     raise SystemExit('FAIL: %s was not found under %s; build first' % (name, build_dir))
 
 
-def run(cmd):
+def run(cmd, png=True):
+    # run() also starts dds_decode.py, bc_check and the viewers, so the backend goes on the encoder's command lines
+    # alone, recognised by the executable's own name. A command line that already names a backend is an arm about the
+    # backends themselves (the thread-count and cross-backend arms) and keeps the one it names.
+    if (BACKEND and os.path.basename(cmd[0]).lower().startswith('nntc_encode')
+            and '--backend' not in cmd):
+        cmd = list(cmd) + ['--backend', BACKEND]
+    # The gate's round trips read the _recon_ PNGs, which the encoder no longer writes by default; an encode that does
+    # not say otherwise gets them. png=False keeps a command line exactly as written (the bare-command arm).
+    if png and os.path.basename(cmd[0]).lower().startswith('nntc_encode') and '--png' not in cmd:
+        cmd = list(cmd) + ['--png', '1']
     print('$ ' + ' '.join(cmd))
     # The executables print UTF-8 (their manifest makes the active code page UTF-8), so their output is decoded as
     # UTF-8 whatever the console's own code page is; a byte that is not UTF-8 is replaced, never fatal.
@@ -107,6 +137,151 @@ def check_tree():
                 if pattern.search(line):
                     failures.append('%s:%d: %s: %s' % (os.path.relpath(path, ROOT), i, label, line.strip()))
     return failures
+
+
+# The files docs/CPU_BACKEND_PLAN.md decision 1 says are not edited while a second backend is built beside them: the six
+# .cu files, the two device headers they read, and model.h, whose declarations ARE the CUDA arm's. The rule is kept by
+# a machine rather than by memory (section 2.5): tests/kernel_hashes.txt carries one `sha256  path` line per file, and
+# a kernel file can change only in a commit that also changes that file - which is a line in a diff the owner sees. The
+# bytes hashed are the bytes on disk; the tree stores these files with CRLF and git converts nothing, so a checkout on
+# either platform hashes the same.
+KERNEL_HASHES = 'tests/kernel_hashes.txt'
+KERNEL_FILES = ['src/init.cu', 'src/solve_decoder.cu', 'src/solve_level1.cu', 'src/solve_level0.cu',
+                'src/refine_bc.cu', 'src/objective.cu', 'src/device.cuh', 'src/sample.cuh', 'src/model.h']
+
+
+def kernel_hash_check():
+    """The first arm, because it needs no executable and takes milliseconds: a moved kernel file is reported before
+    anything is encoded with it, and the report names the file.
+
+    Every file is hashed before the verdict, so one run names every file that moved rather than the first. The list
+    in tests/kernel_hashes.txt is also held to KERNEL_FILES in both directions: a line dropped from the file would
+    otherwise stop guarding its kernel without anything failing.
+    """
+    try:
+        lines = open(os.path.join(ROOT, KERNEL_HASHES), encoding='ascii').read().splitlines()
+    except (OSError, UnicodeDecodeError) as e:
+        raise SystemExit('FAIL: %s cannot be read (%s)' % (KERNEL_HASHES, e))
+    recorded = {}
+    for i, line in enumerate(lines, 1):
+        parts = line.split('  ')
+        if len(parts) != 2 or len(parts[0]) != 64 or any(c not in '0123456789abcdef' for c in parts[0]):
+            raise SystemExit('FAIL: %s:%d is not a `sha256  path` line: %r' % (KERNEL_HASHES, i, line))
+        if parts[1] in recorded:
+            raise SystemExit('FAIL: %s:%d names %s a second time' % (KERNEL_HASHES, i, parts[1]))
+        recorded[parts[1]] = parts[0]
+    missing = [p for p in KERNEL_FILES if p not in recorded]
+    extra = sorted(p for p in recorded if p not in KERNEL_FILES)
+    if missing or extra:
+        raise SystemExit('FAIL: %s does not list exactly the %d guarded files: missing %s; not guarded %s'
+                         % (KERNEL_HASHES, len(KERNEL_FILES), ', '.join(missing) or 'none', ', '.join(extra) or 'none'))
+    moved = []
+    for path in KERNEL_FILES:
+        try:
+            now = hashlib.sha256(open(os.path.join(ROOT, path), 'rb').read()).hexdigest()
+        except OSError as e:
+            raise SystemExit('FAIL: the kernel file %s cannot be read (%s)' % (path, e))
+        if now != recorded[path]:
+            moved.append((path, now))
+    for path, now in moved:
+        print('FAIL: %s: its sha256 is %s, and %s records %s' % (path, now, KERNEL_HASHES, recorded[path]))
+    if moved:
+        raise SystemExit('FAIL: %d kernel file(s) changed: %s. These files are not edited by accident '
+                         '(docs/CPU_BACKEND_PLAN.md section 2.5); a DELIBERATE kernel change must update %s in the '
+                         'same commit, so that the change is a line in the diff'
+                         % (len(moved), ', '.join(p for p, _ in moved), KERNEL_HASHES))
+    print('  kernel hashes: the %d files of %s are unchanged' % (len(KERNEL_FILES), KERNEL_HASHES))
+    record('the kernel hashes', 'the six .cu files, device.cuh, sample.cuh and model.h match %s' % KERNEL_HASHES)
+
+
+def cmake_cache(build_dir):
+    """The CMakeCache.txt of the configure that produced build_dir, as a dict. A multi-config generator puts the
+    executables one directory below the cache (build/Release, build/Debug), a single-config one beside it."""
+    for d in (build_dir, os.path.dirname(os.path.abspath(build_dir))):
+        path = os.path.join(d, 'CMakeCache.txt')
+        if os.path.isfile(path):
+            cache = {}
+            for line in open(path, encoding='utf-8', errors='replace'):
+                if line[:1] in ('#', '/', '\n') or '=' not in line or ':' not in line.split('=', 1)[0]:
+                    continue
+                key, value = line.rstrip('\n').split('=', 1)
+                cache[key.split(':', 1)[0]] = value
+            return cache
+    raise SystemExit('FAIL: no CMakeCache.txt in %s or its parent: the CPU-only build arm configures with the cmake '
+                     'and the generator of the build under test, so it needs that build\'s cache' % build_dir)
+
+
+def cpu_only_build_check(build_dir, exe):
+    """The proof that the dispatch is complete (docs/CPU_BACKEND_PLAN.md section 1.7), re-run on every gate.
+
+    Configured with the CUDA compiler hidden, the six .cu files are not compiled, the global-scope functions they define
+    do not exist, and NNTC_CUDA is undefined, so the CUDA arm is not compiled either. model.h still DECLARES the
+    globals, so a call site that names one instead of its be:: forwarder still compiles - and then fails to LINK, with
+    the linker naming the symbol. A clean link is therefore a machine-checked statement that every device call in the
+    host code goes through the dispatcher, which is the property a CPU backend's correctness rests on: without it a
+    missed call site would run the CUDA function under --backend cpu and look mysteriously correct.
+
+    It is the LAST arm because it is the slowest, and it runs every time rather than behind a flag because a proof that
+    has to be asked for is not re-run on the change that breaks it. What keeps it affordable is that its build
+    directory persists under out/ (out/ is the gate's own scratch and gitignored): the first run configures and builds
+    from nothing, and every later run re-configures, which is quick, and rebuilds only the host files that changed -
+    and a host file that changed is exactly what can have broken the link. The directory is per platform, because
+    WSL runs this same gate on this same tree with a different generator and one cache cannot serve both.
+
+    The configure reuses the build under test's own cmake, generator, platform and Visual Studio instance, from its
+    cache, but never its toolset: that names cuda=, and a cuda= toolset with no CUDA compiler is a FATAL_ERROR by
+    CMakeLists.txt's own rule.
+    """
+    start = time.time()
+    cache = cmake_cache(build_dir)
+    cmake = cache.get('CMAKE_COMMAND')
+    generator = cache.get('CMAKE_GENERATOR')
+    if not cmake or not generator:
+        raise SystemExit('FAIL: the CMake cache of %s names no CMAKE_COMMAND or CMAKE_GENERATOR' % build_dir)
+    scratch = os.path.join(OUT, 'cpu_only_build_' + ('windows' if os.name == 'nt' else 'posix'))
+    # The executable under test says which configuration it is; building the same one keeps the proof about the
+    # flags the gate is running under (a Debug gate proves the Debug link).
+    config = 'Debug' if os.path.basename(os.path.dirname(os.path.abspath(exe))) == 'Debug' else 'Release'
+    configure = [cmake, '-S', '.', '-B', scratch, '-G', generator, '-DCMAKE_CUDA_COMPILER=NOTFOUND']
+    if cache.get('CMAKE_GENERATOR_PLATFORM'):
+        configure += ['-A', cache['CMAKE_GENERATOR_PLATFORM']]
+    if cache.get('CMAKE_GENERATOR_INSTANCE'):
+        configure += ['-DCMAKE_GENERATOR_INSTANCE=' + cache['CMAKE_GENERATOR_INSTANCE']]
+    if 'CMAKE_CONFIGURATION_TYPES' not in cache:
+        configure += ['-DCMAKE_BUILD_TYPE=' + config]
+    print('$ ' + ' '.join(configure))
+    proc = subprocess.run(configure, cwd=ROOT, capture_output=True, text=True, encoding='utf-8', errors='replace')
+    backends = re.findall(r'nntc_encode backends: (.*)', proc.stdout)
+    if proc.returncode != 0:
+        sys.stdout.write(proc.stdout[-4000:])
+        sys.stderr.write(proc.stderr[-4000:])
+        raise SystemExit('FAIL: the CPU-only configure of %s returned %d' % (scratch, proc.returncode))
+    if backends != ['cpu']:
+        sys.stdout.write(proc.stdout[-4000:])
+        raise SystemExit('FAIL: the CPU-only configure reports the backends %s, not cpu alone: the CUDA compiler was '
+                         'not hidden, so a build here would prove nothing' % (backends or 'nowhere'))
+    build = [cmake, '--build', scratch, '--config', config, '--target', 'nntc_encode', '--parallel']
+    print('$ ' + ' '.join(build))
+    proc = subprocess.run(build, cwd=ROOT, capture_output=True, text=True, encoding='utf-8', errors='replace')
+    if proc.returncode != 0:
+        # The failure this arm exists for: name the symbols, so the call site is one search away.
+        unresolved = sorted(set(re.findall(r'unresolved external symbol "?([^"\s]+(?: [^"(]*\([^)]*\))?)',
+                                           proc.stdout) +
+                                re.findall(r'undefined reference to [`\']([^\']+)\'', proc.stdout + proc.stderr)))
+        sys.stdout.write(proc.stdout[-6000:])
+        sys.stderr.write(proc.stderr[-4000:])
+        if unresolved:
+            for symbol in unresolved:
+                print('FAIL: unresolved without CUDA: %s' % symbol)
+            raise SystemExit('FAIL: the CPU-only build does not link: %d symbol(s) the .cu files define are still '
+                             'called from the host code; every device call goes through be:: '
+                             '(docs/CPU_BACKEND_PLAN.md section 1.7)' % len(unresolved))
+        raise SystemExit('FAIL: the CPU-only build of nntc_encode in %s returned %d' % (scratch, proc.returncode))
+    seconds = time.time() - start
+    print('  the CPU-only build: nntc_encode (%s) configured without CUDA and linked in %s, %.1f s'
+          % (config, scratch, seconds))
+    record('the CPU-only link', 'nntc_encode (%s) links with the CUDA compiler hidden, so every device call goes '
+                                'through the dispatcher (%.1f s)' % (config, seconds))
 
 
 # The round line carries the chain's per-level PSNR between `sampled psnr` and `moved0` whenever mips are stored, so
@@ -502,7 +677,7 @@ def vk_six_texture_arm(build_dir, desc):
         return vk_skip_note('nntc_view_vk was not built')
     frames = {}
     for t in range(6):
-        got = vk_shot(vk, desc, os.path.join('out', 'tiny_six_vk%d.bmp' % t), ['--tex', str(t)])
+        got = vk_shot(vk, desc, os.path.join(OUT, 'tiny_six_vk%d.bmp' % t), ['--tex', str(t)])
         if got is None:
             print('  the Vulkan viewer: skipped, no Vulkan device on this machine')
             return vk_skip_note('this machine reports no Vulkan device')
@@ -515,7 +690,7 @@ def vk_six_texture_arm(build_dir, desc):
             if frames[a] == frames[b]:
                 raise SystemExit('FAIL: the Vulkan viewer drew the same frame for --tex %d and --tex %d, so its '
                                  'shader is not selecting the output triple' % (a, b))
-    past = vk_shot(vk, desc, os.path.join('out', 'tiny_six_vk6.bmp'), ['--tex', '6'])
+    past = vk_shot(vk, desc, os.path.join(OUT, 'tiny_six_vk6.bmp'), ['--tex', '6'])
     if past is None or 'WARNING: --tex 6 is outside 0..5' not in past[1]:
         raise SystemExit('FAIL: --tex 6 on a six-texture material must warn on the Vulkan viewer\'s stderr, not %r'
                          % (past and past[1].strip()))
@@ -669,8 +844,8 @@ def bc_checks(encode, build_dir):
 
     # The frame comparisons, and first the thing they rest on: that one asset renders to the same bytes every launch.
     view = executable(build_dir, 'nntc_view')
-    a = shot_stable(view, compressed + '_nntc.json', os.path.join('out', 'tiny_bc_file.bmp'), [])
-    b, _ = shot(view, compressed + '_u_nntc.json', os.path.join('out', 'tiny_bc_load.bmp'), ['--bc'])
+    a = shot_stable(view, compressed + '_nntc.json', os.path.join(OUT, 'tiny_bc_file.bmp'), [])
+    b, _ = shot(view, compressed + '_u_nntc.json', os.path.join(OUT, 'tiny_bc_load.bmp'), ['--bc'])
     if a != b:
         raise SystemExit('FAIL: the viewer renders the BC asset differently from the same plane packed at load')
     print('  the viewer: the BC-in-file frame is byte-identical to the packed-at-load frame (%d bytes)' % len(a))
@@ -679,8 +854,8 @@ def bc_checks(encode, build_dir):
     # file's own BC5 + BC4 against the pack the viewer makes of the uncompressed twin of the same solve. It exercises
     # the two-texture binding and the shader's "use .r of t2 at three channels" path, which the two-channel case does
     # not reach at all.
-    a3, _ = shot(view, three + '_nntc.json', os.path.join('out', 'tiny_bc3_file.bmp'), [])
-    b3, _ = shot(view, three_u + '_nntc.json', os.path.join('out', 'tiny_bc3_load.bmp'), ['--bc'])
+    a3, _ = shot(view, three + '_nntc.json', os.path.join(OUT, 'tiny_bc3_file.bmp'), [])
+    b3, _ = shot(view, three_u + '_nntc.json', os.path.join(OUT, 'tiny_bc3_load.bmp'), ['--bc'])
     if a3 != b3:
         raise SystemExit('FAIL: the viewer renders the two-file BC level 0 differently from the same plane packed at '
                          'load')
@@ -883,8 +1058,8 @@ def bc8_checks(encode, build_dir):
         print('  the viewer: skipped (Windows only)')
         return
     view = executable(build_dir, 'nntc_view')
-    frame, _ = shot(view, prefix + '_nntc.json', os.path.join('out', 'tiny_bc8_shot.bmp'), [])
-    raw, _ = shot(view, prefix + '_nntc.json', os.path.join('out', 'tiny_bc8_raw0.bmp'), ['--raw0'])
+    frame, _ = shot(view, prefix + '_nntc.json', os.path.join(OUT, 'tiny_bc8_shot.bmp'), [])
+    raw, _ = shot(view, prefix + '_nntc.json', os.path.join(OUT, 'tiny_bc8_raw0.bmp'), ['--raw0'])
     if frame == raw:
         raise SystemExit('FAIL: the bc8 decode frame is the same bytes as --raw0, so the decoder drew nothing')
     print('  the viewer: opens the bc8 asset and its decode differs from its own --raw0 frame (%d bytes)'
@@ -1163,8 +1338,8 @@ def init0_checks(encode):
     # --init0 residual there; the gate says so rather than leaving the reader to believe it. On a material of several
     # textures the two do differ, which is the whole point of the arm, and that is measured in docs/RESULTS.md.
     for name in ('_lat0.dds', '_lat1.dds', '_nntc.json'):
-        a_bytes = open(os.path.join(ROOT, 'out', 'tiny_init0_residual', 'tiny' + name), 'rb').read()
-        b_bytes = open(os.path.join(ROOT, 'out', 'tiny_init0_texture', 'tiny' + name), 'rb').read()
+        a_bytes = open(os.path.join(ROOT, OUT, 'tiny_init0_residual', 'tiny' + name), 'rb').read()
+        b_bytes = open(os.path.join(ROOT, OUT, 'tiny_init0_texture', 'tiny' + name), 'rb').read()
         if a_bytes != b_bytes:
             raise SystemExit('FAIL: --init0 texture differs from --init0 residual on a SINGLE texture, where the one '
                              'texture block is the whole covariance and the two must choose the same direction')
@@ -1357,7 +1532,7 @@ def six_texture_checks(encode, build_dir):
         print('  six textures: nout 18, the loop is monotone and the asset agrees with the report at every level')
 
         for mode, extra in (('bc8', []), ('palette', ['--l0', 'palette', '--bits0', '3'])):
-            checked = run([encode] + crops + ['-o', os.path.join('out', 'tiny_six_check_' + mode), '--png', '0',
+            checked = run([encode] + crops + ['-o', os.path.join(OUT, 'tiny_six_check_' + mode), '--png', '0',
                                               '--check', '--rounds', '3'] + extra)
             if checked.returncode != 0:
                 raise SystemExit('FAIL: six textures under --check --l0 %s returned %d' % (mode, checked.returncode))
@@ -1376,19 +1551,19 @@ def six_texture_checks(encode, build_dir):
 
         # Five textures, nout 15: an odd texture count that neither latent's channel count divides, run for its own
         # sake because every other case in the tree is two, four or six.
-        five = run([encode] + crops[:5] + ['-o', os.path.join('out', 'tiny_five')])
+        five = run([encode] + crops[:5] + ['-o', os.path.join(OUT, 'tiny_five')])
         if five.returncode != 0:
             raise SystemExit('FAIL: a five-texture material returned %d' % five.returncode)
         if 'nntc_encode: 5 textures' not in five.stdout or ', nout 15' not in five.stdout:
             raise SystemExit('FAIL: five inputs must be one material of five textures and nout 15')
         loop_checks(five.stdout, 1e-4)
-        level_checks(five.stdout, os.path.join('out', 'tiny_five', 'c0'))
+        level_checks(five.stdout, os.path.join(OUT, 'tiny_five', 'c0'))
         print('  five textures: nout 15 solves and its asset agrees with the report at every level')
 
         # Determinism AT SIX TEXTURES. The plain determinism check runs on one texture, and what a larger nout changes
         # is the shape of every reduction block (a) makes; a reduction whose order drifted with the output count would
         # pass there and fail here.
-        det = [os.path.join('out', 'tiny_six_det_%s' % side) for side in ('a', 'b')]
+        det = [os.path.join(OUT, 'tiny_six_det_%s' % side) for side in ('a', 'b')]
         for d in det:
             proc = run([encode] + crops + ['-o', d, '--png', '0', '--quiet'])
             if proc.returncode != 0:
@@ -1400,13 +1575,15 @@ def six_texture_checks(encode, build_dir):
                 raise SystemExit('FAIL: two six-texture encodes differ in %s' % suffix)
         print('  six textures: two encodes of the same six inputs are byte-identical')
 
-        quiet = run([encode] + crops + ['-o', os.path.join('out', 'tiny_six_quiet'), '--png', '0', '--quiet'])
+        quiet = run([encode] + crops + ['-o', os.path.join(OUT, 'tiny_six_quiet'), '--png', '0', '--quiet'])
         if quiet.returncode != 0:
             raise SystemExit('FAIL: --quiet returned %d' % quiet.returncode)
         if 'nntc_encode: 6 textures' in quiet.stdout or re.search(r'^round\s+\d+', quiet.stdout, re.MULTILINE):
             raise SystemExit('FAIL: --quiet must print neither the banner and its settings rows nor the round lines')
-        # --quiet means quiet: nothing but WARNING and ERROR lines. This run has neither, so its stdout must be empty.
-        stray = [line for line in quiet.stdout.splitlines() if line.strip() and not line.startswith('WARNING')]
+        # --quiet means quiet: nothing but WARNING and ERROR lines. This run has neither, so its stdout must be empty -
+        # except for a Debug build's own first line, 'DEBUG build', which is printed whatever the options say.
+        stray = [line for line in quiet.stdout.splitlines()
+                 if line.strip() and not line.startswith('WARNING') and line != 'DEBUG build']
         if stray:
             raise SystemExit('FAIL: --quiet must print nothing but warnings and errors, not %r' % stray[:3])
         if quiet.stderr.strip():
@@ -1426,7 +1603,7 @@ def six_texture_checks(encode, build_dir):
         view = executable(build_dir, 'nntc_view')
         frames = {}
         for t in range(6):
-            frame, err = shot(view, prefix + '_nntc.json', os.path.join('out', 'tiny_six_shot%d.bmp' % t), ['--tex', str(t)])
+            frame, err = shot(view, prefix + '_nntc.json', os.path.join(OUT, 'tiny_six_shot%d.bmp' % t), ['--tex', str(t)])
             if 'WARNING: --tex' in err:
                 raise SystemExit('FAIL: --tex %d is inside a six-texture material and must not warn: %r'
                                  % (t, err.strip()))
@@ -1436,7 +1613,7 @@ def six_texture_checks(encode, build_dir):
                 if frames[a] == frames[b]:
                     raise SystemExit('FAIL: --tex %d and --tex %d drew the same frame, so the shader is not selecting '
                                      'the output triple' % (a, b))
-        past, err = shot(view, prefix + '_nntc.json', os.path.join('out', 'tiny_six_shot6.bmp'), ['--tex', '6'])
+        past, err = shot(view, prefix + '_nntc.json', os.path.join(OUT, 'tiny_six_shot6.bmp'), ['--tex', '6'])
         if 'WARNING: --tex 6 is outside 0..5' not in err:
             raise SystemExit('FAIL: --tex 6 on a six-texture material must warn on stderr, not %r' % err.strip())
         if past != frames[0]:
@@ -1484,7 +1661,7 @@ def mip_filter_checks(encode):
         raise SystemExit('FAIL: the unfiltered run returned %d' % proc.returncode)
     for name in ('_lat0.dds', '_lat1.dds', '_nntc.json'):
         a = open(os.path.join(ROOT, plain + name), 'rb').read()
-        b = open(os.path.join(ROOT, os.path.join('out', 'tiny_filter_default'), 'tiny' + name), 'rb').read()
+        b = open(os.path.join(ROOT, os.path.join(OUT, 'tiny_filter_default'), 'tiny' + name), 'rb').read()
         if a != b:
             raise SystemExit('FAIL: --mip-filter default differs from no flag at all in %s' % name)
     base = open(os.path.join(ROOT, plain + '_src_M1.png'), 'rb').read()
@@ -1709,7 +1886,7 @@ def material_checks(encode, build_dir):
             {'file': 'c0.png', 'type': 'albedo', 'filter': 'mitchell', 'srgb': True, 'edge': 'wrap', 'weight': 2,
              'rgb_weights': [1, 1, 0.5]},
             {'file': 'c1.png', 'type': 'normal', 'filter': 'catmullrom', 'normal_map': True}])
-        odir = os.path.join('out', 'tiny_material')
+        odir = os.path.join(OUT, 'tiny_material')
         prefix = os.path.join(odir, 'full')   # the asset takes the MATERIAL's stem, not the first texture's
         proc = run([encode, full, '-o', odir])
         if proc.returncode != 0:
@@ -1736,7 +1913,7 @@ def material_checks(encode, build_dir):
 
         # THE PRECEDENCE. The command line replaces the key and says which value it threw away; the row then says the
         # command line, not the material.
-        over = run([encode, full, '-o', os.path.join('out', 'tiny_material_over'), '--png', '0', '--weights', '1,1'])
+        over = run([encode, full, '-o', os.path.join(OUT, 'tiny_material_over'), '--png', '0', '--weights', '1,1'])
         if over.returncode != 0:
             raise SystemExit('FAIL: --weights over a material returned %d' % over.returncode)
         if 'the material sets weight 2 and --weights sets 1; the command line wins' not in over.stdout:
@@ -1750,19 +1927,19 @@ def material_checks(encode, build_dir):
 
         # The refusals, each by name.
         bad = write_material(os.path.join(tmp, 'unknown.json'), [{'file': 'c0.png', 'normalmap': True}])
-        proc = run([encode, bad, '-o', os.path.join('out', 'tiny_material_bad'), '--png', '0'])
+        proc = run([encode, bad, '-o', os.path.join(OUT, 'tiny_material_bad'), '--png', '0'])
         if proc.returncode == 0 or "'normalmap' is not a key of a texture entry" not in proc.stderr:
             raise SystemExit('FAIL: an unknown material key must be refused by name')
         # An EXPLICIT `default` beside srgb is a contradiction and stays refused. Naming NO filter at all is the other
         # case entirely and is asserted by implied_box_check below, so the entry has to say `default` out loud.
         bad = write_material(os.path.join(tmp, 'srgbdef.json'),
                              [{'file': 'c0.png', 'filter': 'default', 'srgb': True}])
-        proc = run([encode, bad, '-o', os.path.join('out', 'tiny_material_bad'), '--png', '0'])
+        proc = run([encode, bad, '-o', os.path.join(OUT, 'tiny_material_bad'), '--png', '0'])
         if proc.returncode == 0 or 'which derives nothing' not in proc.stderr:
             raise SystemExit("FAIL: srgb beside an explicit default filter must be refused")
         # The same combination, but produced by the COMMAND LINE overriding the material's filter, which the message
         # has to distinguish: the material is not the one that asked for it.
-        proc = run([encode, full, '-o', os.path.join('out', 'tiny_material_bad'), '--png', '0',
+        proc = run([encode, full, '-o', os.path.join(OUT, 'tiny_material_bad'), '--png', '0',
                     '--mip-filter', 'default,default'])
         if proc.returncode == 0 or "that filter came from --mip-filter, which replaced the material's" not in proc.stderr:
             raise SystemExit('FAIL: when --mip-filter caused the default-with-srgb combination, the message must say '
@@ -1770,33 +1947,33 @@ def material_checks(encode, build_dir):
         # AND IT MUST NOT CLAIM A REPLACEMENT THAT DID NOT HAPPEN. The same refusal over a material that named no
         # filter of its own has nothing to have replaced, so that half of the message is dropped.
         plain = write_material(os.path.join(tmp, 'srgbnofilter.json'), [{'file': 'c0.png', 'srgb': True}])
-        proc = run([encode, plain, '-o', os.path.join('out', 'tiny_material_bad'), '--png', '0',
+        proc = run([encode, plain, '-o', os.path.join(OUT, 'tiny_material_bad'), '--png', '0',
                     '--mip-filter', 'default'])
         if proc.returncode == 0 or 'that filter came from --mip-filter' not in proc.stderr:
             raise SystemExit('FAIL: --mip-filter default over a filterless srgb material must still be refused')
         if "replaced the material's" in proc.stderr:
             raise SystemExit('FAIL: the refusal must not say the material was replaced when it named no filter')
-        proc = run([encode, full, crops[0], '-o', os.path.join('out', 'tiny_material_bad'), '--png', '0'])
+        proc = run([encode, full, crops[0], '-o', os.path.join(OUT, 'tiny_material_bad'), '--png', '0'])
         if proc.returncode == 0 or 'cannot stand beside image arguments' not in proc.stderr:
             raise SystemExit('FAIL: a material and image arguments together must be refused')
-        proc = run([encode, full, full, '-o', os.path.join('out', 'tiny_material_bad'), '--png', '0'])
+        proc = run([encode, full, full, '-o', os.path.join(OUT, 'tiny_material_bad'), '--png', '0'])
         if proc.returncode == 0 or 'two material JSONs' not in proc.stderr:
             raise SystemExit('FAIL: two materials in one run must be refused')
         empty = write_material(os.path.join(tmp, 'empty.json'), [])
-        proc = run([encode, empty, '-o', os.path.join('out', 'tiny_material_bad'), '--png', '0'])
+        proc = run([encode, empty, '-o', os.path.join(OUT, 'tiny_material_bad'), '--png', '0'])
         if proc.returncode == 0 or 'empty array' not in proc.stderr:
             raise SystemExit('FAIL: an empty material array must be refused')
         bad = write_material(os.path.join(tmp, 'both.json'),
                              [{'file': 'c0.png', 'filter': 'mitchell', 'srgb': True, 'normal_map': True}])
-        proc = run([encode, bad, '-o', os.path.join('out', 'tiny_material_bad'), '--png', '0'])
+        proc = run([encode, bad, '-o', os.path.join(OUT, 'tiny_material_bad'), '--png', '0'])
         if proc.returncode == 0 or 'cannot also ask for' not in proc.stderr:
             raise SystemExit('FAIL: normal_map with srgb must be refused')
         bad = write_material(os.path.join(tmp, 'weight.json'), [{'file': 'c0.png', 'weight': -1}])
-        proc = run([encode, bad, '-o', os.path.join('out', 'tiny_material_bad'), '--png', '0'])
+        proc = run([encode, bad, '-o', os.path.join(OUT, 'tiny_material_bad'), '--png', '0'])
         if proc.returncode == 0 or '--weights must not be negative' not in proc.stderr:
             raise SystemExit("FAIL: a material's negative weight must be refused by the same message a flag's is")
         bad = write_material(os.path.join(tmp, 'rgb.json'), [{'file': 'c0.png', 'rgb_weights': [0, 0, 0]}])
-        proc = run([encode, bad, '-o', os.path.join('out', 'tiny_material_bad'), '--png', '0'])
+        proc = run([encode, bad, '-o', os.path.join(OUT, 'tiny_material_bad'), '--png', '0'])
         if proc.returncode == 0 or '--rgb-weights must not be all zero' not in proc.stderr:
             raise SystemExit("FAIL: a material's all-zero rgb weights must be refused by the same message")
         print('  the material: an unknown key, srgb beside an explicit default (from either side), a mixed command '
@@ -1804,7 +1981,7 @@ def material_checks(encode, build_dir):
               'materials, an empty array, normal_map with srgb, and the weight checks are all refused by name')
 
         # --quiet over a material: no banner, no rows, no round lines, the report all the same.
-        quiet = run([encode, full, '-o', os.path.join('out', 'tiny_material_quiet'), '--png', '0', '--quiet'])
+        quiet = run([encode, full, '-o', os.path.join(OUT, 'tiny_material_quiet'), '--png', '0', '--quiet'])
         if quiet.returncode != 0:
             raise SystemExit('FAIL: --quiet over a material returned %d' % quiet.returncode)
         if 'nntc_encode: 2 textures' in quiet.stdout or re.search(r'^round\s+\d+', quiet.stdout, re.MULTILINE):
@@ -1820,8 +1997,8 @@ def material_checks(encode, build_dir):
         print("  the material: dds_decode.py --grid passes on the material's asset")
         if os.name == 'nt':
             view = executable(build_dir, 'nntc_view')
-            frame, _ = shot(view, prefix + '_nntc.json', os.path.join('out', 'tiny_material_shot.bmp'), ['--tex', '1'])
-            raw, _ = shot(view, prefix + '_nntc.json', os.path.join('out', 'tiny_material_raw0.bmp'), ['--tex', '1',
+            frame, _ = shot(view, prefix + '_nntc.json', os.path.join(OUT, 'tiny_material_shot.bmp'), ['--tex', '1'])
+            raw, _ = shot(view, prefix + '_nntc.json', os.path.join(OUT, 'tiny_material_raw0.bmp'), ['--tex', '1',
                                                                                                  '--raw0'])
             if frame == raw:
                 raise SystemExit("FAIL: the material asset's decode frame is the same bytes as its --raw0 frame, so "
@@ -1836,7 +2013,7 @@ def material_checks(encode, build_dir):
                             ('mitchell', {'file': 'c0.png', 'filter': 'mitchell'}),
                             ('srgb', {'file': 'c0.png', 'filter': 'mitchell', 'srgb': True})):
             path = write_material(os.path.join(tmp, name + '.json'), [entry])
-            odir = os.path.join('out', 'tiny_srgb_' + name)
+            odir = os.path.join(OUT, 'tiny_srgb_' + name)
             proc = run([encode, path, '-o', odir])
             if proc.returncode != 0:
                 raise SystemExit('FAIL: the %s material returned %d' % (name, proc.returncode))
@@ -1850,7 +2027,7 @@ def material_checks(encode, build_dir):
         for name, entry in (('srgb', {'file': 'c0.png', 'filter': 'mitchell', 'srgb': True}),
                             ('normal', {'file': 'c0.png', 'filter': 'mitchell', 'normal_map': True})):
             path = write_material(os.path.join(tmp, 'det_' + name + '.json'), [entry])
-            dirs = [os.path.join('out', 'det_%s_%s' % (name, side)) for side in ('a', 'b')]
+            dirs = [os.path.join(OUT, 'det_%s_%s' % (name, side)) for side in ('a', 'b')]
             for d in dirs:
                 proc = run([encode, path, '-o', d, '--png', '0'])
                 if proc.returncode != 0:
@@ -1898,7 +2075,7 @@ def normal_renorm_check(encode):
         for name, entry in (('flat', {'file': 'n.png', 'filter': 'box'}),
                             ('renorm', {'file': 'n.png', 'filter': 'box', 'normal_map': True})):
             path = write_material(os.path.join(tmp, name + '.json'), [entry])
-            odir = os.path.join('out', 'tiny_renorm_' + name)
+            odir = os.path.join(OUT, 'tiny_renorm_' + name)
             proc = run([encode, path, '-o', odir, '--mip-min', '4', '--png', '1'])
             if proc.returncode != 0:
                 raise SystemExit('FAIL: the %s renormalisation run returned %d' % (name, proc.returncode))
@@ -1966,7 +2143,7 @@ def implied_box_check(encode):
             for side, entry in (('imp', implied), ('exp', explicit)):
                 name = '%s_%s' % (key, side)
                 path = write_material(os.path.join(tmp, name + '.json'), [entry])
-                odir = os.path.join('out', 'tiny_implied_' + name)
+                odir = os.path.join(OUT, 'tiny_implied_' + name)
                 proc = run([encode, path, '-o', odir])
                 if proc.returncode != 0:
                     raise SystemExit('FAIL: the %s %s run returned %d' % (key, side, proc.returncode))
@@ -1983,7 +2160,7 @@ def implied_box_check(encode):
         # A filter the entry DID name is not overridden by a key that would have implied one.
         path = write_material(os.path.join(tmp, 'keep.json'),
                               [{'file': 'c0.png', 'filter': 'mitchell', 'srgb': True}])
-        proc = run([encode, path, '-o', os.path.join('out', 'tiny_implied_keep'), '--png', '0'])
+        proc = run([encode, path, '-o', os.path.join(OUT, 'tiny_implied_keep'), '--png', '0'])
         if proc.returncode != 0:
             raise SystemExit('FAIL: mitchell beside srgb returned %d' % proc.returncode)
         if 'filter mitchell (json)' not in proc.stdout or 'implied by' in proc.stdout:
@@ -1991,7 +2168,7 @@ def implied_box_check(encode):
         # Nor does a filter the COMMAND LINE named. The material named none of its own, so nothing of the material's
         # was overridden and there is no override warning to print either.
         path = write_material(os.path.join(tmp, 'cli.json'), [{'file': 'c0.png', 'srgb': True}])
-        proc = run([encode, path, '-o', os.path.join('out', 'tiny_implied_cli'), '--png', '0',
+        proc = run([encode, path, '-o', os.path.join(OUT, 'tiny_implied_cli'), '--png', '0',
                     '--mip-filter', 'mitchell'])
         if proc.returncode != 0:
             raise SystemExit('FAIL: --mip-filter mitchell over an srgb material returned %d' % proc.returncode)
@@ -2006,7 +2183,7 @@ def implied_box_check(encode):
         # would be the refused contradiction. The row still shows the value and its json source, the filter stays
         # `default`, and the latents are the bare material's to the byte: the vanilla chain, not a re-derived one.
         bare = write_material(os.path.join(tmp, 'inert_ref.json'), [{'file': 'c0.png'}])
-        ref_dir = os.path.join('out', 'tiny_implied_inert_ref')
+        ref_dir = os.path.join(OUT, 'tiny_implied_inert_ref')
         proc = run([encode, bare, '-o', ref_dir, '--png', '0'])
         if proc.returncode != 0:
             raise SystemExit('FAIL: the bare material behind the inert-value cases returned %d' % proc.returncode)
@@ -2016,7 +2193,7 @@ def implied_box_check(encode):
                                 ('inertdefault', {'file': 'c0.png', 'filter': 'default', 'srgb': False},
                                  'filter default (json)')):
             path = write_material(os.path.join(tmp, tag + '.json'), [entry])
-            odir = os.path.join('out', 'tiny_implied_' + tag)
+            odir = os.path.join(OUT, 'tiny_implied_' + tag)
             proc = run([encode, path, '-o', odir, '--png', '0'])
             if proc.returncode != 0:
                 raise SystemExit('FAIL: the inert %s entry must be accepted, not %r' % (tag, proc.stderr.strip()))
@@ -2033,12 +2210,12 @@ def implied_box_check(encode):
         # the box has nothing to derive, and the latents are the bare material's.
         for tag, entry in (('mips0_imp', {'file': 'c0.png', 'srgb': True}), ('mips0_ref', {'file': 'c0.png'})):
             path = write_material(os.path.join(tmp, tag + '.json'), [entry])
-            proc = run([encode, path, '-o', os.path.join('out', 'tiny_implied_' + tag), '--png', '0', '--mips', '0'])
+            proc = run([encode, path, '-o', os.path.join(OUT, 'tiny_implied_' + tag), '--png', '0', '--mips', '0'])
             if proc.returncode != 0:
                 raise SystemExit('FAIL: an implied box under --mips 0 (%s) returned %d' % (tag, proc.returncode))
         for suffix in ('_lat0.dds', '_lat1.dds'):
-            if (open(os.path.join(ROOT, 'out', 'tiny_implied_mips0_imp', 'mips0_imp' + suffix), 'rb').read() !=
-                    open(os.path.join(ROOT, 'out', 'tiny_implied_mips0_ref', 'mips0_ref' + suffix), 'rb').read()):
+            if (open(os.path.join(ROOT, OUT, 'tiny_implied_mips0_imp', 'mips0_imp' + suffix), 'rb').read() !=
+                    open(os.path.join(ROOT, OUT, 'tiny_implied_mips0_ref', 'mips0_ref' + suffix), 'rb').read()):
                 raise SystemExit('FAIL: an implied box with no chain level must leave %s byte-identical' % suffix)
 
         # THE FOOTPRINT, THROUGH THE MATERIAL. The implied box re-derives every level FROM THE BASE, which is the
@@ -2055,7 +2232,7 @@ def implied_box_check(encode):
                                ('wrap', {'file': 'c0.png', 'edge': 'wrap'}),
                                ('bare', {'file': 'c0.png'})):
                 path = write_material(os.path.join(tmp44, tag + '.json'), [entry])
-                odir = os.path.join('out', 'tiny_implied44_' + tag)
+                odir = os.path.join(OUT, 'tiny_implied44_' + tag)
                 proc = run([encode, path, '-o', odir, '--mip-min', '4'])
                 if proc.returncode != 0:
                     raise SystemExit('FAIL: the 44x44 material run %s returned %d' % (tag, proc.returncode))
@@ -2109,7 +2286,7 @@ def material_detail_checks(encode, build_dir):
         for name, entry, want in (('plain', {'file': 'cols.png', 'filter': 'box'}, (128, 128, 128)),
                                   ('srgb', {'file': 'cols.png', 'filter': 'box', 'srgb': True}, (188, 188, 188))):
             path = write_material(os.path.join(tmp, name + '.json'), [entry])
-            odir = os.path.join('out', 'mat_srgb_' + name)
+            odir = os.path.join(OUT, 'mat_srgb_' + name)
             proc = run([encode, path, '-o', odir, '--mip-min', '4', '--quiet'])
             if proc.returncode != 0:
                 raise SystemExit('FAIL: the %s column material returned %d' % (name, proc.returncode))
@@ -2128,7 +2305,7 @@ def material_detail_checks(encode, build_dir):
         for name, edge in (('clamp', 'clamp'), ('wrap', 'wrap')):
             path = write_material(os.path.join(tmp, 'edge_' + name + '.json'),
                                   [{'file': 'c0.png', 'filter': 'mitchell', 'edge': edge}])
-            odir = os.path.join('out', 'mat_edge_' + name)
+            odir = os.path.join(OUT, 'mat_edge_' + name)
             proc = run([encode, path, '-o', odir, '--mip-min', '4', '--quiet'])
             if proc.returncode != 0:
                 raise SystemExit('FAIL: the %s edge material returned %d' % (name, proc.returncode))
@@ -2143,8 +2320,8 @@ def material_detail_checks(encode, build_dir):
         same = write_material(os.path.join(tmp, 'rgbsame.json'),
                               [{'file': 'c0.png', 'rgb_weights': [1, 1, 0.5]},
                                {'file': 'c1.png', 'rgb_weights': [1, 1, 0.5]}])
-        flag_dir = os.path.join('out', 'mat_rgb_flag')
-        json_dir = os.path.join('out', 'mat_rgb_json')
+        flag_dir = os.path.join(OUT, 'mat_rgb_flag')
+        json_dir = os.path.join(OUT, 'mat_rgb_json')
         a = run([encode, crops[0], crops[1], '-o', flag_dir, '--png', '0', '--quiet', '--rgb-weights', '1,1,0.5'])
         b = run([encode, same, '-o', json_dir, '--png', '0', '--quiet'])
         if a.returncode != 0 or b.returncode != 0:
@@ -2161,7 +2338,7 @@ def material_detail_checks(encode, build_dir):
         none = write_material(os.path.join(tmp, 'rgbnone.json'), [{'file': 'c0.png'}, {'file': 'c1.png'}])
         ships = []
         for path, name in ((one, 'rgbone'), (none, 'rgbnone')):
-            proc = run([encode, path, '-o', os.path.join('out', 'mat_' + name), '--png', '0'])
+            proc = run([encode, path, '-o', os.path.join(OUT, 'mat_' + name), '--png', '0'])
             if proc.returncode != 0:
                 raise SystemExit('FAIL: the %s material returned %d' % (name, proc.returncode))
             ships.append(number(proc.stdout, r'E shipped\s+([0-9.e+-]+)', 'E shipped')[0])
@@ -2177,7 +2354,7 @@ def material_detail_checks(encode, build_dir):
         both = write_material(os.path.join(tmp, 'ovr.json'),
                               [{'file': 'c0.png', 'filter': 'mitchell', 'rgb_weights': [1, 1, 0.5]},
                                {'file': 'c1.png', 'filter': 'mitchell', 'rgb_weights': [1, 1, 0.5]}])
-        proc = run([encode, both, '-o', os.path.join('out', 'mat_ovr'), '--png', '0', '--quiet',
+        proc = run([encode, both, '-o', os.path.join(OUT, 'mat_ovr'), '--png', '0', '--quiet',
                     '--mip-filter', 'catmullrom,catmullrom', '--rgb-weights', '1,1,1'])
         if proc.returncode != 0:
             raise SystemExit('FAIL: the override run returned %d' % proc.returncode)
@@ -2196,7 +2373,7 @@ def material_detail_checks(encode, build_dir):
                              % proc.stdout.count('the command line wins'))
         half = write_material(os.path.join(tmp, 'ovrhalf.json'),
                               [{'file': 'c0.png', 'filter': 'mitchell'}, {'file': 'c1.png'}])
-        proc = run([encode, half, '-o', os.path.join('out', 'mat_ovr_half'), '--png', '0', '--quiet',
+        proc = run([encode, half, '-o', os.path.join(OUT, 'mat_ovr_half'), '--png', '0', '--quiet',
                     '--mip-filter', 'catmullrom,catmullrom'])
         if proc.returncode != 0 or proc.stdout.count('the command line wins') != 1:
             raise SystemExit('FAIL: only the texture that carried the key may warn, and the run printed %d warnings'
@@ -2209,7 +2386,7 @@ def material_detail_checks(encode, build_dir):
         # PARSE, and the string that comes back has to be the string that went in.
         nasty = 'a"b\\c\td'
         esc = write_material(os.path.join(tmp, 'escape.json'), [{'file': 'c0.png', 'type': nasty}])
-        odir = os.path.join('out', 'mat_escape')
+        odir = os.path.join(OUT, 'mat_escape')
         proc = run([encode, esc, '-o', odir, '--quiet'])
         if proc.returncode != 0:
             raise SystemExit('FAIL: a material whose type needs escaping returned %d' % proc.returncode)
@@ -2219,14 +2396,14 @@ def material_detail_checks(encode, build_dir):
             raise SystemExit('FAIL: the asset JSON gives the type back as %r, not %r' % (got, nasty))
         if os.name == 'nt':
             view = executable(build_dir, 'nntc_view')
-            frame, _ = shot(view, os.path.join(odir, 'escape_nntc.json'), os.path.join('out', 'mat_escape.bmp'), [])
+            frame, _ = shot(view, os.path.join(odir, 'escape_nntc.json'), os.path.join(OUT, 'mat_escape.bmp'), [])
             if not frame:
                 raise SystemExit('FAIL: the viewer could not open an asset whose JSON carries an escaped string')
         print('  the material: a type of %r round-trips through the asset JSON and the viewer opens it' % nasty)
 
         # (24) THE REFUSALS THAT HAD NO GATE. Every one of them is a run that would otherwise have gone through with a
         # key doing nothing, or with a number the objective cannot use.
-        bad_dir = os.path.join('out', 'mat_refuse')
+        bad_dir = os.path.join(OUT, 'mat_refuse')
         seven = write_material(os.path.join(tmp, 'seven.json'), [{'file': 'c%d.png' % i} for i in range(7)])
         cases = [
             ('seven images on the command line', [encode] + crops + ['-o', bad_dir, '--png', '0'],
@@ -2285,35 +2462,35 @@ def material_detail_checks(encode, build_dir):
         # x.nntc_lat0.dds beside x.nntc_nntc.json; `-o dir/` is a directory and the asset takes the MATERIAL's stem
         # inside it; `-o dir/name.json` IS the descriptor, and the .dds files take that name without the extension.
         vanilla = write_material(os.path.join(tmp, 'm_vanilla.json'), [{'file': 'c0.png'}, {'file': 'c1.png'}])
-        pref = os.path.join('out', 'mat_prefix', 'asset.nntc')
+        pref = os.path.join(OUT, 'mat_prefix', 'asset.nntc')
         proc = run([encode, vanilla, '-o', pref, '--png', '0', '--quiet'])
         if proc.returncode != 0 or not os.path.isfile(os.path.join(ROOT, pref + '_lat0.dds')):
             raise SystemExit('FAIL: -o with an extension must be the prefix itself, so asset.nntc_lat0.dds')
         if not os.path.isfile(os.path.join(ROOT, pref + '_nntc.json')):
             raise SystemExit('FAIL: the descriptor of an explicit prefix is PREFIX_nntc.json')
-        trailing = os.path.join('out', 'mat_trailing') + os.sep
+        trailing = os.path.join(OUT, 'mat_trailing') + os.sep
         proc = run([encode, vanilla, '-o', trailing, '--png', '0', '--quiet'])
         if proc.returncode != 0 or not os.path.isfile(os.path.join(ROOT, trailing, 'm_vanilla_lat0.dds')):
             raise SystemExit('FAIL: -o with a trailing separator must be a directory holding MATERIAL_lat0.dds')
         if not os.path.isfile(os.path.join(ROOT, trailing, 'm_vanilla_nntc.json')):
             raise SystemExit('FAIL: -o with a trailing separator must hold MATERIAL_nntc.json')
-        named = os.path.join('out', 'mat_named', 'chosen.json')
+        named = os.path.join(OUT, 'mat_named', 'chosen.json')
         proc = run([encode, vanilla, '-o', named, '--png', '0', '--quiet'])
         if proc.returncode != 0 or not os.path.isfile(os.path.join(ROOT, named)):
             raise SystemExit('FAIL: -o NAME.json must write the descriptor under exactly that name')
-        if not os.path.isfile(os.path.join(ROOT, 'out', 'mat_named', 'chosen_lat0.dds')):
+        if not os.path.isfile(os.path.join(ROOT, OUT, 'mat_named', 'chosen_lat0.dds')):
             raise SystemExit('FAIL: -o NAME.json must write chosen_lat0.dds beside chosen.json')
-        if os.path.isfile(os.path.join(ROOT, 'out', 'mat_named', 'chosen_nntc.json')):
+        if os.path.isfile(os.path.join(ROOT, OUT, 'mat_named', 'chosen_nntc.json')):
             raise SystemExit('FAIL: -o NAME.json must not also write a _nntc descriptor')
         if os.name == 'nt':
             view = executable(build_dir, 'nntc_view')
-            frame, _ = shot(view, named, os.path.join('out', 'mat_named.bmp'), [])
+            frame, _ = shot(view, named, os.path.join(OUT, 'mat_named.bmp'), [])
             if not frame:
                 raise SystemExit('FAIL: the viewer could not open the descriptor -o named outright')
         # The fallback in tools/dds_decode.py: PREFIX.json is what an asset written before the _nntc suffix carries,
         # and `-o NAME.json` writes exactly that shape, so this asset is the old naming and must still read.
         proc = run([sys.executable, os.path.join('tools', 'dds_decode.py'),
-                    os.path.join('out', 'mat_named', 'chosen'), '--grid'])
+                    os.path.join(OUT, 'mat_named', 'chosen'), '--grid'])
         if proc.returncode != 0 or 'note:' not in proc.stdout:
             raise SystemExit('FAIL: dds_decode.py must fall back to PREFIX.json with a note (%d, %r)'
                              % (proc.returncode, proc.stdout[-200:]))
@@ -2321,8 +2498,8 @@ def material_detail_checks(encode, build_dir):
         # THE VANILLA IDENTITY. A material whose entries carry nothing but `file` asks for exactly what the bare
         # command line asks for, so it must solve to exactly the same latents. The descriptors differ only in the three
         # file names the prefix makes, and nowhere else.
-        cli_dir = os.path.join('out', 'mat_vanilla_cli')
-        json_dir2 = os.path.join('out', 'mat_vanilla_json')
+        cli_dir = os.path.join(OUT, 'mat_vanilla_cli')
+        json_dir2 = os.path.join(OUT, 'mat_vanilla_json')
         for cmd, where in (([encode, crops[0], crops[1], '-o', cli_dir], cli_dir),
                            ([encode, vanilla, '-o', json_dir2], json_dir2)):
             proc = run(cmd + ['--png', '0', '--quiet'])
@@ -2392,7 +2569,7 @@ def review_fix_checks(encode, build_dir):
         entries = json.load(open(beside))
         if not isinstance(entries, list) or len(entries) != 2:
             raise SystemExit('FAIL: the refused run overwrote the material itself')
-        ok = run([encode, beside, '-o', os.path.join('out', 'review_elsewhere'), '--png', '0', '--quiet'])
+        ok = run([encode, beside, '-o', os.path.join(OUT, 'review_elsewhere'), '--png', '0', '--quiet'])
         if ok.returncode != 0:
             raise SystemExit('FAIL: the same material into a different directory must encode (%d)' % ok.returncode)
         print('  the review: a material encoded with no -o writes beside_nntc.json in the current directory, into its own '
@@ -2403,8 +2580,8 @@ def review_fix_checks(encode, build_dir):
         # owner's rule is a CLAMP onto the sane range, not a refusal: the run must succeed, warn once naming the
         # texture and the value, and the settings row must show the clamped weight.
         huge = write_material(os.path.join(tmp, 'huge.json'), [{'file': 'c0.png', 'weight': 1e300}])
-        for cmd in ([encode, huge, '-o', os.path.join('out', 'review_huge'), '--png', '0'],
-                    [encode, crops[0], crops[1], '-o', os.path.join('out', 'review_huge'), '--png', '0',
+        for cmd in ([encode, huge, '-o', os.path.join(OUT, 'review_huge'), '--png', '0'],
+                    [encode, crops[0], crops[1], '-o', os.path.join(OUT, 'review_huge'), '--png', '0',
                      '--weights', '1,1e300']):
             proc = run(cmd)
             if proc.returncode != 0:
@@ -2416,7 +2593,7 @@ def review_fix_checks(encode, build_dir):
                 raise SystemExit('FAIL: the settings row must show the clamped weight 128')
             if 'psnr 100.00' in proc.stdout or 'nan' in proc.stdout.lower().replace('nan(ind)', 'nan'):
                 raise SystemExit('FAIL: the clamped run must not carry a nan objective')
-        small = run([encode, crops[0], crops[1], '-o', os.path.join('out', 'review_huge'), '--png', '0',
+        small = run([encode, crops[0], crops[1], '-o', os.path.join(OUT, 'review_huge'), '--png', '0',
                      '--weights', '1,1e-9'])
         if small.returncode != 0 or 'is raised to 1e-06' not in small.stdout:
             raise SystemExit('FAIL: a positive weight below what a float holds must be raised with a warning')
@@ -2425,7 +2602,7 @@ def review_fix_checks(encode, build_dir):
 
         # (3) --weights USED TO EXIT 1 WITHOUT A WORD, while the --mip-filter arm nine lines below it named its value.
         for value in ('abc', '', '1,', ',1', 'inf', 'nan', '1e999'):
-            bad = run([encode, crops[0], '-o', os.path.join('out', 'review_bad'), '--png', '0', '--weights', value])
+            bad = run([encode, crops[0], '-o', os.path.join(OUT, 'review_bad'), '--png', '0', '--weights', value])
             if bad.returncode == 0 or 'ERROR' not in bad.stderr or '--weights' not in bad.stderr:
                 raise SystemExit('FAIL: --weights %r must be refused with a message naming the flag, not %r'
                                  % (value, bad.stderr.strip()))
@@ -2440,7 +2617,7 @@ def review_fix_checks(encode, build_dir):
             uni = os.path.join(tmp, 'unicode.json')
             with io.open(uni, 'w', encoding='utf-8') as f:
                 f.write(json.dumps([{'file': u'caf\u00e9.png'}], ensure_ascii=False))
-            proc = run([encode, uni, '-o', os.path.join('out', 'review_unicode'), '--png', '0', '--quiet'])
+            proc = run([encode, uni, '-o', os.path.join(OUT, 'review_unicode'), '--png', '0', '--quiet'])
             if proc.returncode != 0:
                 raise SystemExit('FAIL: a material naming a non-ASCII file must encode it (%d): %s'
                                  % (proc.returncode, proc.stderr.strip()))
@@ -2449,7 +2626,7 @@ def review_fix_checks(encode, build_dir):
             # code page; the embedded manifest declares it UTF-8, so the accented name survives from the shell to fopen
             # and back out in the wrote line. The gate passes the argument as a Python str, which subprocess hands to
             # CreateProcessW; the C runtime then narrows it to the active code page, UTF-8 under the manifest.
-            proc = run([encode, accent, '-o', os.path.join('out', 'review_unicode_cli'), '--png', '0'])
+            proc = run([encode, accent, '-o', os.path.join(OUT, 'review_unicode_cli'), '--png', '0'])
             if proc.returncode != 0:
                 raise SystemExit('FAIL: a non-ASCII file named on the command line must encode (%d): %s'
                                  % (proc.returncode, proc.stderr.strip()))
@@ -2461,7 +2638,7 @@ def review_fix_checks(encode, build_dir):
 
         # (5) --quiet MEANS NO PROGRESS. It used to leave about thirty lines behind: the level-0 init block, the grid
         # freeze, the pack, the refinement, the outer passes and two stray blank lines.
-        quiet = run([encode, crops[0], crops[1], '-o', os.path.join('out', 'review_quiet'), '--png', '0', '--quiet'])
+        quiet = run([encode, crops[0], crops[1], '-o', os.path.join(OUT, 'review_quiet'), '--png', '0', '--quiet'])
         if quiet.returncode != 0:
             raise SystemExit('FAIL: the --quiet run returned %d' % quiet.returncode)
         noisy = [l for l in quiet.stdout.splitlines() if re.match(r'^(level 0|grid frozen|round|nntc_encode:)', l)]
@@ -2475,11 +2652,11 @@ def review_fix_checks(encode, build_dir):
         # every other case here is about.
         pad = os.path.join(tmp, 'pad45.png')
         write_rgb8(pad, 45, 30, lambda x, y: ((x * 5) & 255, (y * 9) & 255, ((x + y) * 3) & 255))
-        proc = run([encode, pad, '-o', os.path.join('out', 'review_quiet_pad'), '--png', '0', '--quiet'])
+        proc = run([encode, pad, '-o', os.path.join(OUT, 'review_quiet_pad'), '--png', '0', '--quiet'])
         if proc.returncode != 0 or 'WARNING: the input is 45x30' not in proc.stdout:
             raise SystemExit('FAIL: --quiet must still print the padding WARNING')
         over = write_material(os.path.join(tmp, 'over.json'), [{'file': 'c0.png', 'weight': 2}])
-        proc = run([encode, over, '-o', os.path.join('out', 'review_quiet_over'), '--png', '0', '--quiet',
+        proc = run([encode, over, '-o', os.path.join(OUT, 'review_quiet_over'), '--png', '0', '--quiet',
                     '--weights', '1'])
         if proc.returncode != 0 or 'the command line wins' not in proc.stdout:
             raise SystemExit('FAIL: --quiet must still print the override WARNING')
@@ -2489,12 +2666,12 @@ def review_fix_checks(encode, build_dir):
         # trailing comma is the everyday hand-edit. Both used to come back as the same "must be one JSON array".
         bom = os.path.join(tmp, 'bom.json')
         open(bom, 'wb').write(b'\xef\xbb\xbf' + json.dumps([{'file': 'c0.png'}]).encode('utf-8'))
-        proc = run([encode, bom, '-o', os.path.join('out', 'review_bom'), '--png', '0', '--quiet'])
+        proc = run([encode, bom, '-o', os.path.join(OUT, 'review_bom'), '--png', '0', '--quiet'])
         if proc.returncode != 0:
             raise SystemExit('FAIL: a material with a UTF-8 byte-order mark must encode (%d)' % proc.returncode)
         comma = os.path.join(tmp, 'comma.json')
         open(comma, 'wb').write(b'[\r\n  {"file": "c0.png"},\r\n]\r\n')
-        bad = run([encode, comma, '-o', os.path.join('out', 'review_bad'), '--png', '0'])
+        bad = run([encode, comma, '-o', os.path.join(OUT, 'review_bad'), '--png', '0'])
         if bad.returncode == 0 or not re.search(r'does not parse: .*\(line \d+, column \d+\)', bad.stderr):
             raise SystemExit('FAIL: a trailing comma must be refused with a line and a column, not %r'
                              % bad.stderr.strip())
@@ -2503,14 +2680,14 @@ def review_fix_checks(encode, build_dir):
         # (7) A REPEATED KEY. Last-wins made the entry below encode c0.png without a word about nope.png.
         dup = os.path.join(tmp, 'dup.json')
         open(dup, 'wb').write(b'[{"file": "nope.png", "file": "c0.png"}]')
-        bad = run([encode, dup, '-o', os.path.join('out', 'review_bad'), '--png', '0'])
+        bad = run([encode, dup, '-o', os.path.join(OUT, 'review_bad'), '--png', '0'])
         if bad.returncode == 0 or "'file' appears twice" not in bad.stderr:
             raise SystemExit('FAIL: a repeated key in one entry must be refused by name, not %r' % bad.stderr.strip())
         print('  the review: a key repeated inside one entry is refused by name')
 
         # (8) THE SEED DIRECTION AT SIX TEXTURES. The line was bounded by the old four-texture cap, so outputs 12..17
         # printed as +0.0000 whatever the direction the seed had actually taken.
-        proc = run([encode] + crops + ['-o', os.path.join('out', 'review_six_dir'), '--png', '0', '--init0',
+        proc = run([encode] + crops + ['-o', os.path.join(OUT, 'review_six_dir'), '--png', '0', '--init0',
                                        'residual', '--rounds', '1'])
         if proc.returncode != 0:
             raise SystemExit('FAIL: the six-texture --init0 residual run returned %d' % proc.returncode)
@@ -2532,7 +2709,7 @@ def review_fix_checks(encode, build_dir):
         # asserted in a comment. The comment it replaces was wrong about why the clamp is there.
         stripe = os.path.join(tmp, 'stripe.png')
         write_rgb8(stripe, 64, 64, lambda x, y: (255, 255, 255) if (x & 1) else (0, 0, 0))
-        proc = run([encode, stripe, '-o', os.path.join('out', 'review_stripe'), '--png', '0', '--mip-filter',
+        proc = run([encode, stripe, '-o', os.path.join(OUT, 'review_stripe'), '--png', '0', '--mip-filter',
                     'mitchell', '--diag'])
         if proc.returncode != 0:
             raise SystemExit('FAIL: the stripe run returned %d' % proc.returncode)
@@ -2557,7 +2734,7 @@ def review_fix_checks(encode, build_dir):
         sub = os.path.join(tmp, 'sub')
         os.makedirs(sub, exist_ok=True)
         missing = write_material(os.path.join(sub, 'missing.json'), [{'file': '../nope.png'}])
-        bad = run([encode, missing, '-o', os.path.join('out', 'review_bad'), '--png', '0'])
+        bad = run([encode, missing, '-o', os.path.join(OUT, 'review_bad'), '--png', '0'])
         named = re.search(r"cannot read '([^']*)'", bad.stderr)
         if bad.returncode == 0 or not named:
             raise SystemExit('FAIL: a material naming a file that is not there must be refused by path, not %r'
@@ -2666,7 +2843,7 @@ def diag_and_16bit_checks(encode):
                            meaningless. This is the gate on load_rgb8.
     """
     odir, prefix = out_asset('diag16', source='tiny')
-    grey = os.path.join(ROOT, 'out', 'diag16_src', 'grey16.png')
+    grey = os.path.join(ROOT, OUT, 'diag16_src', 'grey16.png')
     write_grey16(grey, 64, 64)
     proc = run([encode, os.path.join('tests', 'tiny.png'), grey, '-o', odir, '--diag'])
     if proc.returncode != 0:
@@ -2883,9 +3060,12 @@ def bare_command_check(encode):
     before = set(os.listdir(ROOT))
     made = []
     try:
-        proc = run([encode, os.path.join('tests', 'tiny.png')])
+        proc = run([encode, os.path.join('tests', 'tiny.png')], png=False)
         if proc.returncode != 0:
             raise SystemExit('FAIL: nntc_encode with no flags returned %d' % proc.returncode)
+        pngs = [n for n in os.listdir(ROOT) if n not in before and n.endswith('.png')]
+        if pngs:
+            raise SystemExit('FAIL: the bare command wrote PNGs (%s); --png defaults to 0' % ', '.join(sorted(pngs)))
         expected = ['tiny_lat0.dds', 'tiny_lat1.dds', 'tiny_nntc.json']
         for name in expected:
             path = os.path.join(ROOT, name)
@@ -2911,6 +3091,159 @@ def bare_command_check(encode):
             if os.path.isfile(path):
                 os.remove(path)
 
+def gray_first_checks(encode):
+    """A grayscale FIRST texture: its G and B are exact copies of its R, so the box init takes the second texture's
+    channels before them (level 1 starts from source channels 0 3 4 5, not three copies of one channel); the same two
+    textures the other way round, and a lone gray texture, leave the init as it always was."""
+    import tempfile
+    import shutil
+    from PIL import Image as PILImage
+
+    tmp = tempfile.mkdtemp(prefix='nntc_grayfirst_')
+    try:
+        base = PILImage.open(os.path.join(ROOT, 'tests', 'tiny.png')).convert('RGB')
+        rgb_png = os.path.join(tmp, 'rgb.png')
+        gray_png = os.path.join(tmp, 'gray.png')
+        base.save(rgb_png)
+        base.convert('L').save(gray_png)
+        cases = (('gray_first', [gray_png, rgb_png], True), ('gray_second', [rgb_png, gray_png], False),
+                 ('gray_alone', [gray_png], False))
+        for name, inputs, expect in cases:
+            odir, _ = out_asset('grayfirst_' + name, name)
+            proc = run([encode] + inputs + ['-o', odir, '--png', '0', '--rounds', '4'])
+            if proc.returncode != 0:
+                raise SystemExit('FAIL: the %s encode returned %d' % (name, proc.returncode))
+            took = 'level 1 init: level 1 takes source channels 0 3 4 5;' in proc.stdout
+            if took != expect or (not expect and 'level 1 init: level 1 takes' in proc.stdout):
+                raise SystemExit('FAIL: %s: the box init %s reorder its channels' % (name, 'did not' if expect else 'must not'))
+        record('a grayscale first texture', 'the box init takes source channels 0 3 4 5; gray second and gray alone '
+               'keep the plain order')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def synthetic_checks(encode):
+    """Degenerate pictures at tiny and odd sizes: ten kinds (black, white, grey, one constant colour, a gradient,
+    noise from a fixed seed, one-texel stripes, a checkerboard, saturated quadrants, one white dot) at 1x1, 2x2, 4x4,
+    12x20 and 64x4, each at the default layout and at --l0 palette --bits0 3. Every encode must exit 0 with no ERROR line and no
+    nan or inf anywhere in its output, and reach a sanity floor (8 dB, 40 dB for a flat picture) - not a quality bar.
+    Where the gate runs the default backend, each is encoded again on the CPU and
+    byte identity with the first is reported, never asserted (path dependence, docs/CPU_BACKEND_PLAN.md 7.5)."""
+    import tempfile
+    import shutil
+    import numpy as np
+    from PIL import Image as PILImage
+
+    tmp = tempfile.mkdtemp(prefix='nntc_syn_')
+    started = time.time()
+    try:
+        rng = np.random.default_rng(1)
+        pictures = []
+        for w, h in ((1, 1), (2, 2), (4, 4), (12, 20), (64, 4)):
+            z = np.zeros((h, w, 3))
+            g = np.zeros((h, w, 3))
+            g[..., 0] = np.linspace(0, 255, w)[None, :]
+            g[..., 1] = np.linspace(0, 255, h)[:, None]
+            g[..., 2] = 128
+            sat = np.zeros((h, w, 3))
+            sat[..., 0] = 255
+            sat[: h // 2, :, 1] = 255
+            sat[:, : w // 2, 2] = 255
+            dot = np.zeros((h, w, 3))
+            dot[h // 2, w // 2] = 255
+            kinds = (('black', z), ('white', z + 255), ('grey', z + 128), ('const', z + [17, 200, 90]), ('grad', g),
+                     ('noise', rng.integers(0, 256, (h, w, 3))),
+                     ('stripes', np.where((np.indices((h, w))[1] % 2)[..., None] == 0, [0, 0, 0], [255, 255, 255])),
+                     ('checker', np.where((np.indices((h, w)).sum(0) % 2)[..., None] == 0, [255, 0, 0], [0, 0, 255])),
+                     ('sat', sat), ('dot', dot))
+            for kind, arr in kinds:
+                path = os.path.join(tmp, '%s_%dx%d.png' % (kind, w, h))
+                PILImage.fromarray(arr.astype(np.uint8), 'RGB').save(path)
+                pictures.append(path)
+        layouts = (('def', []), ('pal', ['--l0', 'palette', '--bits0', '3']))
+        second = [] if BACKEND else ['--backend', 'cpu']
+        runs = identical = compared = 0
+        for path in pictures:
+            name = os.path.splitext(os.path.basename(path))[0]
+            for lay, flags in layouts:
+                outs = []
+                for extra, tag in (([], 'a'), (second, 'b')) if second else (([], 'a'),):
+                    odir, prefix = out_asset('syn_%s_%s_%s' % (name, lay, tag), name)
+                    proc = run([encode, path, '-o', odir, '--png', '0', '--rounds', '6'] + flags + extra)
+                    runs += 1
+                    if proc.returncode != 0 or 'ERROR' in proc.stderr:
+                        raise SystemExit('FAIL: the synthetic %s (%s%s) returned %d: %s'
+                                         % (name, lay, ' ' + ' '.join(extra) if extra else '', proc.returncode,
+                                            proc.stderr.strip()[-200:]))
+                    if re.search(r'(?<![A-Za-z])(nan|-?inf)(?![A-Za-z])', proc.stdout, re.IGNORECASE):
+                        raise SystemExit('FAIL: the synthetic %s (%s) printed a nan or an inf' % (name, lay))
+                    # Not a quality bar, a sanity one: a broken encode lands near 0 dB, noise at these sizes above
+                    # 17 dB, and a flat picture is reproduced exactly (100 dB).
+                    psnrs = [float(v) for v in re.findall(r'psnr\s+texture \d+\s+([\d.]+) dB', proc.stdout)]
+                    floor = 40.0 if name.split('_')[0] in ('black', 'white', 'grey', 'const') else 8.0
+                    if not psnrs or min(psnrs) < floor:
+                        raise SystemExit('FAIL: the synthetic %s (%s) encoded at %s dB, below the %.0f dB sanity floor'
+                                         % (name, lay, psnrs, floor))
+                    outs.append(os.path.join(ROOT, prefix))
+                if len(outs) == 2:
+                    compared += 1
+                    same = all(open(outs[0] + suffix, 'rb').read() == open(outs[1] + suffix, 'rb').read()
+                               for suffix in ('_lat0.dds', '_lat1.dds')
+                               if os.path.exists(outs[0] + suffix) or os.path.exists(outs[1] + suffix))
+                    identical += same
+        seconds = time.time() - started
+        detail = '%d encodes of %d pictures x 2 layouts, every one exit 0 with no ERROR, nan or inf' % (runs, len(pictures))
+        if compared:
+            detail += '; the CPU re-encode byte-identical on %d of %d' % (identical, compared)
+        record('degenerate pictures', '%s (%.1f s)' % (detail, seconds))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def device_refusal_checks(encode):
+    """A CUDA device index past the end: under --backend auto one WARNING naming why and a CPU encode that succeeds;
+    under --backend cuda one ERROR naming why and exit 1. On a build without CUDA, auto says so and cuda refuses."""
+    odir, _ = out_asset('device99_auto')
+    auto = run([encode, os.path.join('tests', 'tiny.png'), '-o', odir, '--png', '0', '--rounds', '2', '--quiet',
+                '--backend', 'auto', '--device', '99'])
+    warnings = [l for l in auto.stdout.splitlines() if l.startswith('WARNING')]
+    if auto.returncode != 0 or len(warnings) != 1 or 'falls back to cpu' not in warnings[0] or auto.stderr.strip():
+        raise SystemExit('FAIL: --backend auto --device 99 must fall back to the CPU with exactly one WARNING and no '
+                         'ERROR (returned %d, %r, %r)' % (auto.returncode, warnings, auto.stderr.strip()[:200]))
+    odir, _ = out_asset('device99_cuda')
+    cuda = run([encode, os.path.join('tests', 'tiny.png'), '-o', odir, '--png', '0', '--rounds', '2',
+                '--backend', 'cuda', '--device', '99'])
+    if cuda.returncode != 1 or not cuda.stderr.startswith('ERROR: --backend cuda was asked for, but '):
+        raise SystemExit('FAIL: --backend cuda --device 99 must be refused by name with exit 1 (returned %d, %r)'
+                         % (cuda.returncode, cuda.stderr.strip()[:200]))
+    record('an unusable CUDA device', '--backend auto falls back with one WARNING saying why; --backend cuda is '
+           'refused with one ERROR saying why')
+
+
+def size_limit_checks(encode):
+    """The encoder accepts at most 16384 texels per axis (IMAGE_MAX_DIM): one more on either axis is refused by name
+    and exit 1, before anything is decoded; exactly 16384 encodes."""
+    import tempfile
+    import shutil
+    from PIL import Image as PILImage
+
+    tmp = tempfile.mkdtemp(prefix='nntc_size_')
+    try:
+        for name, size, ok in (('wide', (16385, 4), False), ('tall', (4, 16385), False), ('edge', (16384, 4), True)):
+            path = os.path.join(tmp, name + '.png')
+            PILImage.new('RGB', size, (40, 90, 160)).save(path)
+            odir, _ = out_asset('size_' + name, name)
+            proc = run([encode, path, '-o', odir, '--png', '0', '--rounds', '2'])
+            if ok and proc.returncode != 0:
+                raise SystemExit('FAIL: a %dx%d input must encode; it returned %d' % (size + (proc.returncode,)))
+            if not ok and (proc.returncode != 1 or 'the encoder accepts at most 16384x16384' not in proc.stderr):
+                raise SystemExit('FAIL: a %dx%d input must be refused by name with exit 1 (returned %d)'
+                                 % (size + (proc.returncode,)))
+        record('the size limit', '16385 on either axis refused by name with exit 1; 16384 encodes')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def determinism_check(encode):
     """Two encodes of one image with one command line must produce byte-identical files.
 
@@ -2921,7 +3254,7 @@ def determinism_check(encode):
     (a)'s normal equations, the objective, level 1's conjugate gradients and sweeps, and the pca-free box init.
     """
     names = ['_lat0.dds', '_lat1.dds', '_nntc.json']
-    dirs = [os.path.join('out', 'det_a'), os.path.join('out', 'det_b')]
+    dirs = [os.path.join(OUT, 'det_a'), os.path.join(OUT, 'det_b')]
     prefixes = [os.path.join(d, 'tiny') for d in dirs]
     for d in dirs:
         proc = run([encode, os.path.join('tests', 'tiny.png'), '-o', d, '--png', '0'])
@@ -2961,7 +3294,7 @@ def old_format_check(encode, build_dir):
         # run() rather than shot(): the note is on STDOUT, with the rest of the load's commentary, and shot() hands
         # back the stderr a warning would arrive on.
         view = executable(build_dir, 'nntc_view')
-        proc = run([view, desc, '--nooverlay', '--shot', os.path.join('out', 'tiny_oldformat', 'shot.bmp')])
+        proc = run([view, desc, '--nooverlay', '--shot', os.path.join(OUT, 'tiny_oldformat', 'shot.bmp')])
         if proc.returncode != 0:
             raise SystemExit('FAIL: the viewer returned %d on the older format string' % proc.returncode)
         if 'older name of nntc-dds-1' not in proc.stdout:
@@ -2974,7 +3307,7 @@ def old_format_check(encode, build_dir):
     vk_note = vk_skip_note('nntc_view_vk was not built')
     vk_ran = False
     if vk:
-        got = vk_shot(vk, desc, os.path.join('out', 'tiny_oldformat', 'shot_vk.bmp'), [])
+        got = vk_shot(vk, desc, os.path.join(OUT, 'tiny_oldformat', 'shot_vk.bmp'), [])
         if got is None:
             vk_note = vk_skip_note('this machine reports no Vulkan device')
         elif 'older name of nntc-dds-1' not in got[2]:
@@ -3005,7 +3338,7 @@ def argument_and_status_checks(encode):
     tiny = os.path.join('tests', 'tiny.png')
 
     # --no-mkdir: the refusal names the directory, and the directory is still not there afterwards.
-    missing = os.path.join('out', 'no_mkdir_case', 'deeper')
+    missing = os.path.join(OUT, 'no_mkdir_case', 'deeper')
     if os.path.isdir(os.path.join(ROOT, missing)):
         shutil.rmtree(os.path.join(ROOT, missing))
     proc = run([encode, tiny, '-o', missing + os.sep, '--no-mkdir', '--png', '0', '--quiet'])
@@ -3023,7 +3356,7 @@ def argument_and_status_checks(encode):
 
     # THE BARE NAME. `-o out/name` with no extension is a DIRECTORY, and under --no-mkdir it is refused as one; the
     # refusal says which reading it took, because a caller who meant a prefix has no other way to tell.
-    bare = os.path.join('out', 'no_mkdir_bare')
+    bare = os.path.join(OUT, 'no_mkdir_bare')
     if os.path.isdir(os.path.join(ROOT, bare)):
         shutil.rmtree(os.path.join(ROOT, bare))
     proc = run([encode, tiny, '-o', bare, '--no-mkdir', '--png', '0', '--quiet'])
@@ -3041,7 +3374,7 @@ def argument_and_status_checks(encode):
         raise SystemExit('FAIL: dds_decode --grid must accept the prefix and the descriptor path alike')
     if by_prefix.stdout != by_descriptor.stdout:
         raise SystemExit('FAIL: dds_decode must read the same asset from the prefix and from the descriptor path')
-    absent = run([sys.executable, tool, os.path.join('out', 'no_such_asset_here'), '--grid'])
+    absent = run([sys.executable, tool, os.path.join(OUT, 'no_such_asset_here'), '--grid'])
     if absent.returncode != 1:
         raise SystemExit('FAIL: dds_decode over a missing prefix returned %d, not 1' % absent.returncode)
     if 'Traceback' in absent.stderr:
@@ -3052,7 +3385,7 @@ def argument_and_status_checks(encode):
 
     # A descriptor named outright is opened as given. The note is about a PREFIX.json this tool went looking for, so a
     # file the caller pointed straight at must not draw it.
-    named_dir = os.path.join('out', 'named_descriptor')
+    named_dir = os.path.join(OUT, 'named_descriptor')
     named_json = os.path.join(named_dir, 'named.json')
     if os.path.isdir(os.path.join(ROOT, named_dir)):
         shutil.rmtree(os.path.join(ROOT, named_dir))
@@ -3078,7 +3411,7 @@ def argument_and_status_checks(encode):
     # NO -o AT ALL: the prefix is the input's own directory, which exists if and only if the input does, so a missing
     # input under a missing directory must be reported as the input it is - and must leave that directory uncreated,
     # with and without --no-mkdir.
-    gone = os.path.join('out', 'no_such_dir_case')
+    gone = os.path.join(OUT, 'no_such_dir_case')
     if os.path.isdir(os.path.join(ROOT, gone)):
         shutil.rmtree(os.path.join(ROOT, gone))
     for extra in ([], ['--no-mkdir']):
@@ -3093,11 +3426,11 @@ def argument_and_status_checks(encode):
     print('  no -o: a missing input under a missing directory says "cannot read" and creates nothing')
 
     # Exit codes: an unreadable input, an unknown flag and a refused material all end at 1.
-    bad_json = os.path.join(ROOT, 'out', 'no_mkdir_case', 'broken.json')
+    bad_json = os.path.join(ROOT, OUT, 'no_mkdir_case', 'broken.json')
     open(bad_json, 'w').write('{ "textures": [ { "file": ')
     cases = [('an unreadable input', [encode, os.path.join('tests', 'no_such_image.png'), '--quiet']),
              ('an unknown flag', [encode, tiny, '--no-such-flag']),
-             ('a malformed material', [encode, os.path.join('out', 'no_mkdir_case', 'broken.json'), '--quiet'])]
+             ('a malformed material', [encode, os.path.join(OUT, 'no_mkdir_case', 'broken.json'), '--quiet'])]
     for what, cmd in cases:
         proc = run(cmd)
         if proc.returncode != 1:
@@ -3369,7 +3702,7 @@ def vulkan_viewer_checks(encode, build_dir):
     desc = prefix + '_nntc.json'
 
     # The first launch is also the probe: a machine with no driver says so and the case is skipped, not failed.
-    single_vk = os.path.join('out', 'vk_tiny_t0.bmp')
+    single_vk = os.path.join(OUT, 'vk_tiny_t0.bmp')
     probe = run([view, desc, '--nooverlay', '--shot', single_vk] + VK_PLAIN)
     if probe.returncode != 0 and 'no Vulkan device' in probe.stderr:
         record('the Vulkan viewer', 'skipped (this machine reports no Vulkan device)')
@@ -3414,7 +3747,7 @@ def vulkan_viewer_checks(encode, build_dir):
     # the feature, so there is nothing here to refuse - and the honest form of that is to look for a device that lacks
     # it, assert the refusal on the first one found, and SKIP WITH THE REASON when there is none, rather than to write
     # a check that silently tests nothing. The viewer says so in one 'note:' line at start-up, which is what is read.
-    bc_probe = os.path.join('out', 'vk_bc_probe.bmp')
+    bc_probe = os.path.join(OUT, 'vk_bc_probe.bmp')
     no_bc = None
     for index in sorted(devices, key=int):
         seen = run([view, desc, '--nooverlay', '--shot', bc_probe, '--size', '64', '64', '--device', index] + VK_PLAIN)
@@ -3441,8 +3774,8 @@ def vulkan_viewer_checks(encode, build_dir):
         """One asset drawn by both viewers at one camera, and the two frames compared."""
         if not cross:
             raise SystemExit('FAIL: a cross-viewer pair was asked for where there is no Direct3D viewer')
-        a = os.path.join('out', 'vk_%s_d3d.bmp' % tag)
-        b = os.path.join('out', 'vk_%s_vk.bmp' % tag)
+        a = os.path.join(OUT, 'vk_%s_d3d.bmp' % tag)
+        b = os.path.join(OUT, 'vk_%s_vk.bmp' % tag)
         shot(d3d, asset, a, extra)
         w, h = frame_size(a)
         cmd = [view, asset, '--nooverlay', '--shot', b, '--size', str(w), str(h)] + VK_PLAIN + extra
@@ -3475,7 +3808,7 @@ def vulkan_viewer_checks(encode, build_dir):
         # Five identical launches on this stage's other asset too, so the claim covers a material and not only a
         # single image: a frame that is not a function of the command line and the asset alone cannot be the basis of
         # any of the comparisons above.
-        vk_shot_stable(view, mdesc, os.path.join('out', 'vk_mat_stable.bmp'), ['--tex', '1'])
+        vk_shot_stable(view, mdesc, os.path.join(OUT, 'vk_mat_stable.bmp'), ['--tex', '1'])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -3501,8 +3834,8 @@ def vulkan_viewer_checks(encode, build_dir):
         lines.append(pair(desc, 'far_nobias', ['--tex', '0', '--z', '-50', '--noaniso', '--nobias'], max_diff=2))
         # And the two Vulkan frames must differ FROM EACH OTHER. Two pairs that both passed would prove nothing if
         # --nobias had quietly done nothing at this camera: the pair would then be comparing one state twice.
-        biased = open(os.path.join(ROOT, 'out', 'vk_far_noaniso_vk.bmp'), 'rb').read()
-        unbiased = open(os.path.join(ROOT, 'out', 'vk_far_nobias_vk.bmp'), 'rb').read()
+        biased = open(os.path.join(ROOT, OUT, 'vk_far_noaniso_vk.bmp'), 'rb').read()
+        unbiased = open(os.path.join(ROOT, OUT, 'vk_far_nobias_vk.bmp'), 'rb').read()
         if biased == unbiased:
             raise SystemExit('FAIL: at --z -50 --noaniso the Vulkan frames with and without level 1\'s LOD shift are '
                              'the same bytes, so the two pairs above compare one state twice')
@@ -3511,24 +3844,33 @@ def vulkan_viewer_checks(encode, build_dir):
     # The three filter toggles, at a distance where each one has something to do. Each must CHANGE the frame: a flag
     # that is parsed and then reaches no sampler is worse than one that is refused.
     far = ['--z', '-50']
-    base = os.path.join('out', 'vk_far_base.bmp')
+    base = os.path.join(OUT, 'vk_far_base.bmp')
     if run([view, desc, '--nooverlay', '--shot', base] + VK_PLAIN + far).returncode != 0:
         raise SystemExit('FAIL: nntc_view_vk --shot at --z -50 failed')
     base_bytes = open(os.path.join(ROOT, base), 'rb').read()
+    cpu_device = False
     for flag in ('--nomips', '--nobias', '--noaniso'):
-        changed = os.path.join('out', 'vk_far%s.bmp' % flag.replace('-', '_'))
-        if run([view, desc, '--nooverlay', '--shot', changed] + VK_PLAIN + far + [flag]).returncode != 0:
+        changed = os.path.join(OUT, 'vk_far%s.bmp' % flag.replace('-', '_'))
+        proc = run([view, desc, '--nooverlay', '--shot', changed] + VK_PLAIN + far + [flag])
+        if proc.returncode != 0:
             raise SystemExit('FAIL: nntc_view_vk --shot with %s failed' % flag)
-        if open(os.path.join(ROOT, changed), 'rb').read() == base_bytes:
+        # Both latents are read through textureGrad, and a CPU Vulkan device (llvmpipe) gives explicit-gradient
+        # samples no anisotropy at all, so there --noaniso rightly changes nothing. On a GPU it must.
+        cpu_device = re.search(r'drawing on device \d+: .*\(cpu,', proc.stdout) is not None
+        if open(os.path.join(ROOT, changed), 'rb').read() == base_bytes and not (flag == '--noaniso' and cpu_device):
             raise SystemExit('FAIL: %s did not change the Vulkan viewer\'s frame, so it reaches no sampler and no '
                              'shader constant' % flag)
-    print('  the Vulkan viewer: --nomips, --nobias and --noaniso each change the frame at --z -50')
+    if cpu_device:
+        print('  the Vulkan viewer: --nomips and --nobias each change the frame at --z -50; --noaniso is not asserted '
+              'on this CPU device, whose explicit-gradient samples take no anisotropy')
+    else:
+        print('  the Vulkan viewer: --nomips, --nobias and --noaniso each change the frame at --z -50')
 
     # Stage 3's flags, each of which must reach something. --raw0 and --raw1 replace the decode with a latent as
     # stored and --renorm renormalises the shown triple, so all three change the frame of any asset.
-    base3 = vk_shot(view, desc, os.path.join('out', 'vk_flags_base.bmp'), [])[0]
+    base3 = vk_shot(view, desc, os.path.join(OUT, 'vk_flags_base.bmp'), [])[0]
     for flag in ('--raw0', '--raw1', '--renorm'):
-        changed = vk_shot(view, desc, os.path.join('out', 'vk_flags%s.bmp' % flag.replace('-', '_')), [flag])[0]
+        changed = vk_shot(view, desc, os.path.join(OUT, 'vk_flags%s.bmp' % flag.replace('-', '_')), [flag])[0]
         if changed == base3:
             raise SystemExit('FAIL: %s did not change the Vulkan viewer\'s frame, so it reaches no shader constant'
                              % flag)
@@ -3546,7 +3888,7 @@ def vulkan_viewer_checks(encode, build_dir):
     # blocks, there is nothing for the viewer to pack and --bc must do NOTHING; on an uncompressed level 0 the pack is
     # made at load and --bc binds it, which is a different picture. Both halves matter: a --bc that silently did
     # nothing everywhere would pass the first check alone.
-    if vk_shot(view, desc, os.path.join('out', 'vk_bc_file.bmp'), ['--bc'])[0] != base3:
+    if vk_shot(view, desc, os.path.join(OUT, 'vk_bc_file.bmp'), ['--bc'])[0] != base3:
         raise SystemExit('FAIL: --bc changed the frame of an asset whose level 0 is already block-compressed, where '
                          'the Vulkan viewer has no pack of its own to bind')
     updir, uprefix = out_asset('tiny_vk_unc')
@@ -3556,8 +3898,8 @@ def vulkan_viewer_checks(encode, build_dir):
         raise SystemExit('FAIL: the uncompressed-level-0 encode for the Vulkan viewer case returned %d'
                          % proc.returncode)
     udesc = uprefix + '_nntc.json'
-    plain = vk_shot(view, udesc, os.path.join('out', 'vk_unc_plain.bmp'), [])
-    packed = vk_shot(view, udesc, os.path.join('out', 'vk_unc_bc.bmp'), ['--bc'])
+    plain = vk_shot(view, udesc, os.path.join(OUT, 'vk_unc_plain.bmp'), [])
+    packed = vk_shot(view, udesc, os.path.join(OUT, 'vk_unc_bc.bmp'), ['--bc'])
     if 'packed at load' not in packed[2]:
         raise SystemExit('FAIL: the Vulkan viewer must pack an uncompressed level 0 at load and say so: %r'
                          % packed[2][-300:])
@@ -3575,8 +3917,8 @@ def vulkan_viewer_checks(encode, build_dir):
 
     # The overlay. --nooverlay is what every comparison above relies on, so the gate has to know the strip was there
     # to leave off: the same frame with and without it must differ.
-    with_strip = os.path.join('out', 'vk_overlay_on.bmp')
-    without = os.path.join('out', 'vk_overlay_off.bmp')
+    with_strip = os.path.join(OUT, 'vk_overlay_on.bmp')
+    without = os.path.join(OUT, 'vk_overlay_off.bmp')
     made = run([view, desc, '--shot', with_strip, '--size', '640', '480'] + VK_PLAIN)
     if made.returncode != 0:
         raise SystemExit('FAIL: nntc_view_vk --shot with the overlay returned %d: %r' % (made.returncode,
@@ -3593,10 +3935,10 @@ def vulkan_viewer_checks(encode, build_dir):
     # must equal that viewer's own --nooverlay frame, which is what says the strip is drawn OVER the scene and changes
     # nothing under it - and it is why every comparison in this case may use --nooverlay in the first place.
     if cross:
-        ov_d3d = os.path.join('out', 'vk_overlay_d3d.bmp')
-        ov_vk = os.path.join('out', 'vk_overlay_vk.bmp')
-        no_d3d = os.path.join('out', 'vk_overlay_d3d_off.bmp')
-        no_vk = os.path.join('out', 'vk_overlay_vk_off.bmp')
+        ov_d3d = os.path.join(OUT, 'vk_overlay_d3d.bmp')
+        ov_vk = os.path.join(OUT, 'vk_overlay_vk.bmp')
+        no_d3d = os.path.join(OUT, 'vk_overlay_d3d_off.bmp')
+        no_vk = os.path.join(OUT, 'vk_overlay_vk_off.bmp')
         made = run([d3d, desc, '--shot', ov_d3d, '--noaniso'])
         if made.returncode != 0:
             raise SystemExit('FAIL: nntc_view --shot with the overlay returned %d' % made.returncode)
@@ -3669,7 +4011,7 @@ def vulkan_viewer_checks(encode, build_dir):
         for index in devices:
             if index == str(chosen_device):
                 continue
-            probe_cv = run([view, cv_asset, '--nooverlay', '--shot', os.path.join('out', 'vk_coop_probe.bmp'),
+            probe_cv = run([view, cv_asset, '--nooverlay', '--shot', os.path.join(OUT, 'vk_coop_probe.bmp'),
                             '--size', '64', '64', '--device', index, '--coopvec', '1'])
             if probe_cv.returncode == 0:
                 cv_here, cv_dev, cv_device = True, ['--device', index], index
@@ -3690,7 +4032,7 @@ def vulkan_viewer_checks(encode, build_dir):
     else:
         cv_frames = {}
         for flag in ('1', '0'):
-            out = os.path.join('out', 'vk_coop_%s.bmp' % flag)
+            out = os.path.join(OUT, 'vk_coop_%s.bmp' % flag)
             made = run([view, cv_asset, '--nooverlay', '--noaniso', '--shot', out, '--size', '640', '480',
                         '--coopvec', flag] + cv_dev)
             if made.returncode != 0:
@@ -3712,7 +4054,7 @@ def vulkan_viewer_checks(encode, build_dir):
         for index in devices:
             if index == str(cv_device):
                 continue
-            bad_cv = run([view, cv_asset, '--nooverlay', '--shot', os.path.join('out', 'vk_coop_refuse.bmp'),
+            bad_cv = run([view, cv_asset, '--nooverlay', '--shot', os.path.join(OUT, 'vk_coop_refuse.bmp'),
                           '--size', '64', '64', '--device', index, '--coopvec', '1'])
             if bad_cv.returncode == 0:
                 continue        # that device has the extension too, so there is nothing to refuse there
@@ -3751,7 +4093,7 @@ def vulkan_viewer_checks(encode, build_dir):
         # words either way - and the whole strip is not, which is the token itself.
         strips = []
         for flag in ('1', '0'):
-            out = os.path.join('out', 'vk_coop_ovl_%s.bmp' % flag)
+            out = os.path.join(OUT, 'vk_coop_ovl_%s.bmp' % flag)
             made = run([view, cv_asset, '--noaniso', '--shot', out, '--size', '2560', '1440',
                         '--coopvec', flag] + cv_dev)
             if made.returncode != 0:
@@ -3809,7 +4151,7 @@ def vulkan_viewer_checks(encode, build_dir):
     # that is not GLSL, and the run must print SHADER ERROR, exit 1 and write no frame - not a blank picture and an
     # exit code of 0. Key R with a broken shader takes the same compile through the same function, and it cannot be
     # driven from here at all (there is no window to press R in), so it stays a by-hand check.
-    bad_dir = os.path.join('out', 'vk_badshader')
+    bad_dir = os.path.join(OUT, 'vk_badshader')
     os.makedirs(os.path.join(ROOT, bad_dir), exist_ok=True)
     src_dir = os.path.dirname(os.path.join(ROOT, view))
     exe_name = os.path.basename(view)
@@ -3833,7 +4175,7 @@ def vulkan_viewer_checks(encode, build_dir):
     # The copied executable from the badshader directory cannot serve - its own view.frag is the broken one - so the
     # run is the ordinary executable, started from a scratch directory that holds two files named like the shaders and
     # containing nothing that compiles. Every path is absolute, because the working directory is no longer the tree.
-    cwd_dir = os.path.join(ROOT, 'out', 'vk_cwd_decoy')
+    cwd_dir = os.path.join(ROOT, OUT, 'vk_cwd_decoy')
     os.makedirs(cwd_dir, exist_ok=True)
     for name in ('view.vert', 'view.frag'):
         with open(os.path.join(cwd_dir, name), 'w') as f:
@@ -3890,7 +4232,7 @@ def absolute_path_check(encode, build_dir):
             t['file'] = os.path.abspath(os.path.join(ROOT, odir, t['file']))
         for f in t.get('files', []):
             f['file'] = os.path.abspath(os.path.join(ROOT, odir, f['file']))
-    elsewhere = os.path.join('out', 'tiny_abs_paths_elsewhere')
+    elsewhere = os.path.join(OUT, 'tiny_abs_paths_elsewhere')
     os.makedirs(elsewhere, exist_ok=True)
     moved = os.path.join(elsewhere, 'moved_nntc.json')
     with open(moved, 'w') as f:
@@ -3910,11 +4252,409 @@ def absolute_path_check(encode, build_dir):
     print('  absolute paths in a descriptor: every reader takes them as written')
 
 
+def asset_bytes(directory):
+    """Every file an encode wrote into its -o directory, as name -> bytes. The arms below give every run a directory of
+    its own, and a rerun of the gate writes the same names again, so what is there is what that run wrote."""
+    base = os.path.join(ROOT, directory)
+    return {n: open(os.path.join(base, n), 'rb').read() for n in sorted(os.listdir(base))
+            if os.path.isfile(os.path.join(base, n))}
+
+
+# The thread counts the encode half of the thread-count arm runs at. None is no -j at all, the default, which asks the
+# machine (hardware_concurrency). -j1 is the adversarial count: the only one where no worker exists and the calling
+# thread walks every chunk itself (docs/CPU_BACKEND_PLAN.md section 7.3). -j64 is more workers than this machine has
+# cores and more than a deep plane has chunks, which must neither hang nor change a byte.
+THREAD_COUNTS = ['1', '64', None]
+
+
+def thread_count_checks(build_dir, encode):
+    """The CPU backend's result must not depend on how many threads computed it (docs/CPU_BACKEND_PLAN.md sections
+    0a point 2 and 7.3): the pool partitions every run into a chunk count that is a function of the data alone and
+    folds the chunks' partials in chunk order, so -j1 and -j32 must write the same bytes.
+
+    Two halves. nntc_cpu_check holds every ported kernel's every output to the same bits at -j1, -j4, -j16 and -j0 on
+    synthetic layouts built so that the planes span several chunks - the kernel-level proof, which also covers the
+    pool's own contract. Then real encodes, because the drivers between the kernels (the round loop, the pack, the
+    outer passes) are not in that program: tests/tiny.png at the default layout and at --l0 palette, and a 128x128
+    crop of examples/m3.png at the default layout, each at every count of THREAD_COUNTS, every written file compared
+    byte for byte. tiny.png alone is one CPU_CHUNK of texels, so its level-0 kernels would run as one chunk at any
+    count; the crop's base is four, and its BC refinement four block chunks a colour, so there the partition is real
+    (a 192x192 crop, nine chunks, took the arm past 35 s).
+
+    It names --backend cpu on its own command lines and so runs in every gate, with or without a GPU, and under
+    --backend cpu too. Sized to add about half a minute to a Release gate.
+    """
+    start = time.time()
+    check = executable(build_dir, 'nntc_cpu_check')
+    proc = run([check])
+    if proc.returncode != 0 or 'all checks passed' not in proc.stdout:
+        raise SystemExit('FAIL: nntc_cpu_check returned %d: %s' % (proc.returncode, (proc.stderr or proc.stdout)[-600:]))
+    kernels = re.search(r'kernels: (\d+) outputs \((\d+) bytes\) over (\d+) layouts, the same bits at '
+                        r'-j1, -j4, -j16 and -j0', proc.stdout)
+    if not kernels:
+        raise SystemExit('FAIL: nntc_cpu_check did not print its kernels line; the thread-count arm needs it')
+    for rule in ('rule 1-2:', 'rule 4-5:', 'more threads than chunks:', 'transfers:'):
+        if rule not in proc.stdout:
+            raise SystemExit('FAIL: nntc_cpu_check did not print its "%s" line' % rule)
+    check_seconds = time.time() - start
+    print('  thread count: nntc_cpu_check: %s kernel outputs (%s bytes) over %s layouts the same bits at -j1, -j4, '
+          '-j16 and -j0, and the pool\'s contract and the transfers at every count (%.1f s)'
+          % (kernels.group(1), kernels.group(2), kernels.group(3), check_seconds))
+
+    from PIL import Image as PILImage
+    crop_dir = os.path.join(ROOT, OUT, 'threads')
+    os.makedirs(crop_dir, exist_ok=True)
+    crop = os.path.join(OUT, 'threads', 'crop128.png')
+    PILImage.open(os.path.join(ROOT, 'examples', 'm3.png')).convert('RGB').crop((100, 100, 228, 228)).save(
+        os.path.join(ROOT, crop))
+    cases = [('tiny.png, the default layout', os.path.join('tests', 'tiny.png'), [], 'tiny'),
+             ('tiny.png --l0 palette', os.path.join('tests', 'tiny.png'), ['--l0', 'palette'], 'tiny_palette'),
+             ('a 128x128 crop of m3.png, the default layout', crop, [], 'crop128')]
+    encodes = 0
+    for what, source, extra, tag in cases:
+        reference = None
+        for count in THREAD_COUNTS:
+            odir = os.path.join(OUT, 'threads', '%s_j%s' % (tag, count if count is not None else 'default'))
+            cmd = [encode, source, '-o', odir, '--png', '0', '--backend', 'cpu'] + extra
+            if count is not None:
+                cmd += ['-j', count]
+            proc = run(cmd)
+            encodes += 1
+            if proc.returncode != 0:
+                raise SystemExit('FAIL: the CPU encode of %s at -j %s returned %d'
+                                 % (what, count or 'default', proc.returncode))
+            if not re.search(r'^\s+backend\s+cpu\s*$', proc.stdout, re.MULTILINE):
+                raise SystemExit('FAIL: the CPU encode of %s at -j %s does not report the cpu backend'
+                                 % (what, count or 'default'))
+            files = asset_bytes(odir)
+            if not files:
+                raise SystemExit('FAIL: the CPU encode of %s at -j %s wrote nothing' % (what, count or 'default'))
+            if reference is None:
+                reference = (count, files)
+                continue
+            if sorted(files) != sorted(reference[1]):
+                raise SystemExit('FAIL: %s wrote %s at -j %s and %s at -j %s'
+                                 % (what, sorted(files), count or 'default', sorted(reference[1]), reference[0]))
+            for name in files:
+                if files[name] != reference[1][name]:
+                    raise SystemExit('FAIL: %s: %s differs between -j %s and -j %s: the CPU backend\'s result '
+                                     'depends on its thread count' % (what, name, reference[0], count or 'default'))
+        print('  thread count: %s: %d files, %d bytes, byte-identical at -j %s'
+              % (what, len(reference[1]), sum(len(b) for b in reference[1].values()),
+                 ', '.join(c or 'default (%d)' % (os.cpu_count() or 0) for c in THREAD_COUNTS)))
+    seconds = time.time() - start
+    print('  thread count: the arm took %.1f s (nntc_cpu_check %.1f s, %d encodes %.1f s)'
+          % (seconds, check_seconds, encodes, seconds - check_seconds))
+    record('thread-count independence', 'nntc_cpu_check\'s kernels at -j1/4/16/0, and CPU encodes of tiny.png (bc8, '
+           'palette) and a 128x128 crop byte-identical at -j %s (%.1f s)'
+           % ('/'.join(c or 'default' for c in THREAD_COUNTS), seconds))
+
+
+# The cross-backend arm's bars (docs/CPU_BACKEND_PLAN.md section 7.4, set from the measured corpus). Per case, a
+# texture more than CROSS_GROSS_TEXTURE dB worse on the CPU than on CUDA, or a mip level more than CROSS_GROSS_MIP dB
+# worse, is gross: a porting bug, not path dependence, which the rounding experiment of that section put at about a
+# decibel at worst. Over the corpus, the mean signed per-texture difference (CPU minus CUDA) is the bias: path
+# dependence scatters both ways and a porting bug pulls one way, so a mean below CROSS_BIAS_FAIL fails and one below
+# CROSS_BIAS_WARN is a WARNING. Anything else is reported and not judged.
+CROSS_GROSS_TEXTURE = 4.0
+CROSS_GROSS_MIP = 6.0
+CROSS_BIAS_FAIL = -0.5
+CROSS_BIAS_WARN = -0.2
+# The fewest judged textures a mean is taken as a bias over. Without --cross-examples the arm judges tiny.png's one
+# texture, whose difference is a single draw of the path dependence and not a distribution, so only the gross bars
+# apply to it.
+CROSS_BIAS_MIN_TEXTURES = 5
+
+REPORT_TEXTURE_PSNR = re.compile(r'^\s+psnr\s+texture (\d+)\s+(\S+) dB', re.MULTILINE)
+REPORT_MIP_PSNR = re.compile(r'^\s+mip psnr\s+((?:M\d+ \S+\s+)+)dB', re.MULTILINE)
+REPORT_ROUNDS = re.compile(r'^\s+rounds\s+(\d+) \(stopped on ([^)]*)\)', re.MULTILINE)
+REPORT_TIME = re.compile(r'^\s+time\s+([0-9.]+) s total', re.MULTILINE)
+REPORT_BACKEND = re.compile(r'^\s+backend\s+(\S+)\s*$', re.MULTILINE)
+
+
+def cross_report(text, what):
+    """The numbers the cross-backend arm compares, from one encode's report."""
+    textures = [(int(i), float(v)) for i, v in REPORT_TEXTURE_PSNR.findall(text)]
+    if not textures or [i for i, _ in textures] != list(range(len(textures))):
+        raise SystemExit('FAIL: %s printed no per-texture psnr lines' % what)
+    mips = REPORT_MIP_PSNR.search(text)
+    levels = {}
+    if mips:
+        parts = mips.group(1).split()
+        levels = {parts[i]: float(parts[i + 1]) for i in range(0, len(parts), 2)}
+    rounds = REPORT_ROUNDS.search(text)
+    seconds = REPORT_TIME.search(text)
+    backend = REPORT_BACKEND.search(text)
+    if not rounds or not seconds or not backend:
+        raise SystemExit('FAIL: %s printed no rounds, time or backend line' % what)
+    return {'textures': [v for _, v in textures], 'levels': levels, 'rounds': int(rounds.group(1)),
+            'stop': rounds.group(2), 'seconds': float(seconds.group(1)), 'backend': backend.group(1),
+            'tally': ridge_tally(text, what)}
+
+
+def cross_backend_checks(encode, examples):
+    """The same inputs encoded by both backends, judged on the distribution of the PSNR differences
+    (docs/CPU_BACKEND_PLAN.md sections 0a and 7.4).
+
+    What it may assert, and why no more. The two backends run the same algorithm; they are not promised the same
+    bits, because their reductions sum in different orders, and the encoder is path-dependent: a last-bit difference
+    can flip one quantisation decision and the solver then settles in a different optimum of about the same quality.
+    Section 7.4 measured that with the CUDA backend alone (nvcc's fused multiply-add on and off, nothing else
+    changed): up to about a decibel on a texture of the hardest material, both ways. A per-case bar tighter than that
+    cries wolf, so the arm fails only on what path dependence cannot produce - a texture CROSS_GROSS_TEXTURE dB worse,
+    a mip level CROSS_GROSS_MIP dB worse, or a corpus mean pulled one way past CROSS_BIAS_FAIL (taken over at least
+    CROSS_BIAS_MIN_TEXTURES textures) - warns past CROSS_BIAS_WARN, and reports everything else: per case whether the files are byte-identical (said, never
+    asserted), every texture's difference, the worst mip level's, both round counts, both ridge tallies and both times.
+
+    Only tracked inputs, so the arm means the same thing on every machine: tests/tiny.png always, and with
+    --cross-examples the two examples/ materials, m1_m4 at --c0 3 --c1 4 and pavingstones141_1k at --c0 4. They are
+    opt-in because their CPU encodes take about 20 s and 50 s on 32 threads, against a whole Release gate of about
+    100 s, and several minutes each in a Debug build.
+
+    The one-white-pixel dot is encoded by both backends and reported, and gets NO PSNR bar, and nobody should add
+    one: it drives block (a)'s normal matrix nearly singular, so its ridge ladder takes a four-way decision on a
+    floating-point comparison whose rungs are about 7 dB apart (docs/MATHEMATICS.md section 3). Which rung a last-bit
+    difference lands on is a property of the matrix, not of either backend. ill_conditioned_checks holds each
+    backend to its own invariants on it. For the same reason a case whose ridge tally is not all-standard on both
+    backends is taken out of the judged distribution and said so by name.
+
+    Runs only where the build has both backends and a CUDA device answers; elsewhere it says why and records itself
+    as skipped. Under --backend cpu it is skipped too: it names both backends itself, so the default run carries it.
+    """
+    if BACKEND:
+        print('  cross-backend: SKIPPED under --backend %s: the arm names both backends on its own command lines, so '
+              'the default run of the gate carries it' % BACKEND)
+        record('the cross-backend comparison', 'SKIPPED under --backend %s (the default run carries it)' % BACKEND)
+        return
+    start = time.time()
+    # (what, the command line's inputs and flags, judged, the output directory's stem). The stem is the case's own
+    # name and not its place in the list, which depends on --cross-examples: one directory must only ever hold one
+    # case's files, or the byte comparison would count another case's leftovers.
+    cases = [('tiny.png', [os.path.join('tests', 'tiny.png')], True, 'tiny')]
+    if examples:
+        cases += [('m1_m4 --c0 3 --c1 4',
+                   [os.path.join('examples', 'm1_m4_source_material.json'), '--c0', '3', '--c1', '4'], True, 'm1_m4'),
+                  ('pavingstones141_1k --c0 4',
+                   [os.path.join('examples', 'pavingstones141_1k_source_material.json'), '--c0', '4'], True,
+                   'pavingstones')]
+    from PIL import Image as PILImage
+    os.makedirs(os.path.join(ROOT, OUT, 'cross'), exist_ok=True)
+    dot = os.path.join(OUT, 'cross', 'dot_64x64.png')
+    image = PILImage.new('RGB', (64, 64), (0, 0, 0))
+    image.putpixel((50, 18), (255, 255, 255))
+    image.save(os.path.join(ROOT, dot))
+    cases.append(('the one-white-pixel dot (no bar)', [dot], False, 'dot'))
+
+    judged = []          # (case, texture index, cpu - cuda) over the cases the bars apply to
+    gross = []
+    rows = []
+    for index, (what, args, barred, stem) in enumerate(cases):
+        reports = {}
+        files = {}
+        for backend in ('cuda', 'cpu'):
+            odir = os.path.join(OUT, 'cross', '%s_%s' % (stem, backend))
+            proc = run([encode] + args + ['-o', odir, '--png', '0', '--backend', backend])
+            if proc.returncode != 0:
+                if backend == 'cuda' and index == 0 and 'ERROR: --backend cuda' in proc.stderr:
+                    said = [l for l in proc.stderr.splitlines() if l.startswith('ERROR:')][0]
+                    print('  cross-backend: SKIPPED: this build or machine cannot run the CUDA backend (%s)' % said)
+                    record('the cross-backend comparison', 'SKIPPED: no usable CUDA backend here')
+                    return
+                raise SystemExit('FAIL: the %s encode of %s returned %d' % (backend, what, proc.returncode))
+            reports[backend] = cross_report(proc.stdout, 'the %s encode of %s' % (backend, what))
+            if reports[backend]['backend'] != backend:
+                raise SystemExit('FAIL: the encode of %s asked for --backend %s and reports %s'
+                                 % (what, backend, reports[backend]['backend']))
+            files[backend] = asset_bytes(odir)
+        a, b = reports['cuda'], reports['cpu']
+        if len(a['textures']) != len(b['textures']) or sorted(a['levels']) != sorted(b['levels']):
+            raise SystemExit('FAIL: %s: the backends report different texture counts or mip levels' % what)
+        identical = sorted(files['cuda']) == sorted(files['cpu']) and all(
+            files['cuda'][n] == files['cpu'][n] for n in files['cuda'])
+        diffs = [c - g for g, c in zip(a['textures'], b['textures'])]
+        mip = [(level, b['levels'][level] - a['levels'][level]) for level in sorted(a['levels'], key=lambda s: int(s[1:]))]
+        worst_mip = min(mip, key=lambda x: x[1]) if mip else None
+        standard = not any(a['tally'][1:]) and not any(b['tally'][1:])
+        print('  cross-backend: %s: %s; texture psnr CUDA %s, CPU %s, CPU - CUDA %s dB; worst mip level %s; rounds '
+              '%d (%s) / %d (%s); ridge %s / %s; %.2f s / %.2f s'
+              % (what, 'the files are BYTE-IDENTICAL (%d files)' % len(files['cpu']) if identical
+                 else 'the files differ',
+                 ' '.join('%.2f' % v for v in a['textures']), ' '.join('%.2f' % v for v in b['textures']),
+                 ' '.join('%+.2f' % d for d in diffs),
+                 '%s %+.2f dB' % worst_mip if worst_mip else 'none (one level stored)',
+                 a['rounds'], a['stop'], b['rounds'], b['stop'],
+                 '/'.join(map(str, a['tally'])), '/'.join(map(str, b['tally'])), a['seconds'], b['seconds']))
+        if a['rounds'] != b['rounds'] or a['stop'] != b['stop']:
+            print('  cross-backend: %s: NOTE the two runs are of different lengths, so its differences compare runs '
+                  'that stopped at different rounds' % what)
+        if not barred:
+            rows.append((what, identical, diffs, worst_mip, 'reported, no bar'))
+            continue
+        if not standard:
+            print('  cross-backend: %s: NOTE block (a) left its standard rung on one backend, so the case is a '
+                  'near-singular one and is taken out of the judged distribution' % what)
+            rows.append((what, identical, diffs, worst_mip, 'near-singular, not judged'))
+            continue
+        rows.append((what, identical, diffs, worst_mip, 'judged'))
+        for t, d in enumerate(diffs):
+            judged.append((what, t, d))
+            if d < -CROSS_GROSS_TEXTURE:
+                gross.append('%s texture %d is %.2f dB worse on the CPU (the bar is %.1f)'
+                             % (what, t, -d, CROSS_GROSS_TEXTURE))
+        for level, d in mip:
+            if d < -CROSS_GROSS_MIP:
+                gross.append('%s mip level %s is %.2f dB worse on the CPU (the bar is %.1f)'
+                             % (what, level, -d, CROSS_GROSS_MIP))
+    for g in gross:
+        print('FAIL: cross-backend: ' + g)
+    if gross:
+        raise SystemExit('FAIL: the cross-backend arm found %d gross difference(s): more than path dependence can '
+                         'produce, so a porting bug to find with --backend check' % len(gross))
+    values = sorted(d for _, _, d in judged)
+    if not values:
+        raise SystemExit('FAIL: the cross-backend arm judged no texture: every barred case was near-singular')
+    mean = sum(values) / len(values)
+    median = (values[len(values) // 2] if len(values) % 2
+              else 0.5 * (values[len(values) // 2 - 1] + values[len(values) // 2]))
+    worse = sum(1 for d in values if d < 0)
+    better = sum(1 for d in values if d > 0)
+    identical_cases = sum(1 for r in rows if r[1])
+    seconds = time.time() - start
+    print('  cross-backend: %d case(s), %d byte-identical; over the %d judged texture(s) CPU - CUDA mean %+.3f dB, '
+          'median %+.3f, from %+.2f to %+.2f, %d worse, %d better, %d equal (gross bars %.0f dB a texture, %.0f dB '
+          'a mip level; bias bars %.1f fail, %.1f warn, from %d textures); %.1f s%s'
+          % (len(rows), identical_cases, len(values), mean, median, values[0], values[-1], worse, better,
+             len(values) - worse - better, CROSS_GROSS_TEXTURE, CROSS_GROSS_MIP, CROSS_BIAS_FAIL, CROSS_BIAS_WARN,
+             CROSS_BIAS_MIN_TEXTURES, seconds,
+             '' if examples else '; the examples/ materials are opt-in (--cross-examples)'))
+    if len(values) < CROSS_BIAS_MIN_TEXTURES:
+        # One texture's difference is one draw of the path dependence, not a mean: a single case may land half a
+        # decibel either way with no bias at all (section 7.4), so a bias bar on it would be a per-case bar in
+        # disguise. The gross bars above still hold.
+        print('  cross-backend: the bias bars are not applied to %d texture(s), fewer than %d: a mean of so few is '
+              'one draw of the path dependence, not a distribution (--cross-examples adds the nine textures of the '
+              'examples/ materials)' % (len(values), CROSS_BIAS_MIN_TEXTURES))
+    elif mean < CROSS_BIAS_FAIL:
+        raise SystemExit('FAIL: the CPU backend is %.3f dB below CUDA on average over %d textures, past the bias bar '
+                         'of %.1f dB: path dependence scatters both ways, a porting bug pulls one way'
+                         % (-mean, len(values), -CROSS_BIAS_FAIL))
+    elif mean < CROSS_BIAS_WARN:
+        print('WARNING: cross-backend: the CPU backend is %.3f dB below CUDA on average over %d textures, between the '
+              'warning bar (%.1f) and the failure bar (%.1f): worth a --backend check run'
+              % (-mean, len(values), CROSS_BIAS_WARN, CROSS_BIAS_FAIL))
+    record('the cross-backend comparison', '%d case(s)%s, %d byte-identical; mean CPU - CUDA %+.3f dB over %d '
+           'texture(s), no gross difference (%.1f s)'
+           % (len(rows), '' if examples else ' (tiny.png and the dot; --cross-examples adds the examples/ materials)',
+              identical_cases, mean, len(values), seconds))
+
+
+def tsan_check(build_dir):
+    """The ThreadSanitizer arm (docs/CPU_BACKEND_PLAN.md section 3.4): a CPU-only build instrumented with
+    -fsanitize=thread, running nntc_cpu_check (every kernel at -j4, -j16 and -j0, the pool's contract at up to 64
+    threads) and two threaded encodes of tests/tiny.png (the default layout and --l0 palette, -j 4), with
+    halt_on_error. Zero reports are required; any report fails the gate.
+
+    Linux only: MSVC has no ThreadSanitizer, so on Windows the arm is recorded as skipped and never as run. The build
+    is the CPU-only configure, because TSan needs the whole program instrumented and nvcc's device objects are not;
+    it persists under out/tsan_build_posix, so after the first run a gate re-configures and rebuilds only what changed.
+
+    A BACKSTOP, NOT THE PROOF. Section 3.4 records what this sanitizer could not show: with k_level0_search's own
+    order reinstated in a scratch build - the beta loop reading a same-colour neighbour ahead of the alpha test, a
+    real race - and even with a race planted on purpose, TSan reported nothing inside a long encode of a material,
+    at -O1 and -O0, at -j4 and -j16: at a chunk boundary the two racing accesses are a whole chunk of work apart,
+    and the sanitizer finds races whose accesses are close in time. So the arm catches the careless race (a shared
+    counter, a scratch buffer handed to two workers), and the per-kernel audit table of section 3.4, which argues
+    every kernel's reads against every other worker's writes, is the proof that there are none. That is also why the
+    arm keeps to nntc_cpu_check and tiny.png instead of paying TSan's roughly eightfold cost on a material.
+    """
+    if not sys.platform.startswith('linux'):
+        print('  ThreadSanitizer: SKIPPED on %s: the arm is Linux only (MSVC has no ThreadSanitizer); the WSL gate '
+              'runs it' % sys.platform)
+        record('ThreadSanitizer', 'SKIPPED on %s (Linux only; MSVC has no ThreadSanitizer)' % sys.platform)
+        return
+    start = time.time()
+    cache = cmake_cache(build_dir)
+    cmake = cache.get('CMAKE_COMMAND')
+    generator = cache.get('CMAKE_GENERATOR')
+    if not cmake or not generator:
+        raise SystemExit('FAIL: the CMake cache of %s names no CMAKE_COMMAND or CMAKE_GENERATOR' % build_dir)
+    # clang first, as section 6's recipe was measured with it; gcc's -fsanitize=thread is the same runtime.
+    compiler = shutil.which('clang++') or shutil.which('g++')
+    if not compiler:
+        raise SystemExit('FAIL: the ThreadSanitizer arm needs clang++ or g++ on the PATH')
+    scratch = os.path.join(OUT, 'tsan_build_posix')
+    configure = [cmake, '-S', '.', '-B', scratch, '-G', generator, '-DCMAKE_CUDA_COMPILER=NOTFOUND',
+                 '-DCMAKE_BUILD_TYPE=RelWithDebInfo', '-DCMAKE_CXX_COMPILER=' + compiler,
+                 '-DCMAKE_CXX_FLAGS=-fsanitize=thread -g -O1', '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread']
+    print('$ ' + ' '.join(configure))
+    proc = subprocess.run(configure, cwd=ROOT, capture_output=True, text=True, encoding='utf-8', errors='replace')
+    if proc.returncode != 0:
+        sys.stdout.write(proc.stdout[-4000:])
+        sys.stderr.write(proc.stderr[-4000:])
+        raise SystemExit('FAIL: the ThreadSanitizer configure of %s returned %d' % (scratch, proc.returncode))
+    if re.findall(r'nntc_encode backends: (.*)', proc.stdout) != ['cpu']:
+        raise SystemExit('FAIL: the ThreadSanitizer configure is not CPU-only; an instrumented build needs every '
+                         'object instrumented, which nvcc\'s are not')
+    build = [cmake, '--build', scratch, '--target', 'nntc_cpu_check', 'nntc_encode', '--parallel']
+    print('$ ' + ' '.join(build))
+    proc = subprocess.run(build, cwd=ROOT, capture_output=True, text=True, encoding='utf-8', errors='replace')
+    if proc.returncode != 0:
+        sys.stdout.write(proc.stdout[-6000:])
+        sys.stderr.write(proc.stderr[-4000:])
+        raise SystemExit('FAIL: the ThreadSanitizer build in %s returned %d' % (scratch, proc.returncode))
+    built = time.time() - start
+    # Zero reports from an uninstrumented binary would prove nothing, and a cached configure whose flags were lost
+    # would build one silently; the sanitizer's runtime entry point in both binaries says the flags took.
+    for name in ('nntc_cpu_check', 'nntc_encode'):
+        if b'__tsan_init' not in open(os.path.join(ROOT, scratch, name), 'rb').read():
+            raise SystemExit('FAIL: %s in %s is not instrumented (no __tsan_init): the -fsanitize=thread flags did '
+                             'not reach the build' % (name, scratch))
+    env = dict(os.environ)
+    env['TSAN_OPTIONS'] = 'halt_on_error=1'
+    runs = [('nntc_cpu_check', [os.path.join(scratch, 'nntc_cpu_check')]),
+            ('tiny.png at -j 4', [os.path.join(scratch, 'nntc_encode'), os.path.join('tests', 'tiny.png'),
+                                  '-o', os.path.join(OUT, 'tsan_tiny'), '--png', '0', '--backend', 'cpu', '-j', '4']),
+            ('tiny.png --l0 palette at -j 4',
+             [os.path.join(scratch, 'nntc_encode'), os.path.join('tests', 'tiny.png'), '-o',
+              os.path.join(OUT, 'tsan_tiny_palette'), '--png', '0', '--backend', 'cpu', '-j', '4', '--l0', 'palette'])]
+    timings = []
+    for what, cmd in runs:
+        print('$ TSAN_OPTIONS=halt_on_error=1 ' + ' '.join(cmd))
+        t = time.time()
+        proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, encoding='utf-8', errors='replace',
+                              env=env)
+        timings.append(time.time() - t)
+        reports = (proc.stdout + proc.stderr).count('WARNING: ThreadSanitizer')
+        if proc.returncode != 0 or reports:
+            sys.stdout.write(proc.stdout[-3000:])
+            sys.stderr.write(proc.stderr[-6000:])
+            raise SystemExit('FAIL: ThreadSanitizer: %s returned %d with %d report(s); zero are required'
+                             % (what, proc.returncode, reports))
+    seconds = time.time() - start
+    print('  ThreadSanitizer: %s, built with %s: zero reports from %s (%s); %.1f s with the build'
+          % (scratch, os.path.basename(compiler), ', '.join(w for w, _ in runs),
+             ', '.join('%.1f s' % t for t in timings), seconds))
+    record('ThreadSanitizer', 'zero reports: nntc_cpu_check and two -j 4 encodes of tiny.png, %s -fsanitize=thread '
+           '(%.1f s, the build %.1f s)' % (os.path.basename(compiler), seconds, built))
+
+
 def main():
+    global BACKEND, OUT
     build_dir = os.path.join(ROOT, 'build')
     if '--build-dir' in sys.argv:
         build_dir = sys.argv[sys.argv.index('--build-dir') + 1]
+    if '--backend' in sys.argv:
+        i = sys.argv.index('--backend')
+        BACKEND = sys.argv[i + 1] if i + 1 < len(sys.argv) else ''
+        if BACKEND != 'cpu':
+            raise SystemExit('FAIL: --backend takes cpu (the default run is the encoder\'s own default backend), '
+                             'not %r' % BACKEND)
+        OUT = 'out_cpu'
+    # The cross-backend arm's two examples/ materials: opt-in, because they would double a Release gate's time
+    # (cross_backend_checks says by how much).
+    cross_examples = '--cross-examples' in sys.argv
 
+    kernel_hash_check()
     encode = executable(build_dir, 'nntc_encode')
     bits0 = 3
     odir, prefix = out_asset('tiny')
@@ -3989,12 +4729,19 @@ def main():
     record('the bare command line', 'writes the three files in the current directory, with the default layout')
 
     determinism_check(encode)
+    thread_count_checks(build_dir, encode)
     diag_and_16bit_checks(encode)
     alpha_input_checks(encode)
+    gray_first_checks(encode)
+    size_limit_checks(encode)
+    device_refusal_checks(encode)
+    synthetic_checks(encode)
 
-    objective_checks(encode, os.path.join('out', 'tiny_check'))
+    objective_checks(encode, os.path.join(OUT, 'tiny_check'))
     record('the objective', 'device E == the host brute force, and every block lowers it')
     record('block (b)', 'converged, dense-solve agreement, zero gradient left behind')
+
+    cross_backend_checks(encode, cross_examples)
 
     failures = check_tree()
     for f in failures:
@@ -4004,6 +4751,9 @@ def main():
     print('  tree: clean')
     record('the tree', 'no forbidden pattern in %s' % ', '.join(SEARCHED_DIRS + SEARCHED_FILES))
 
+    cpu_only_build_check(build_dir, encode)
+    tsan_check(build_dir)
+
     width = max(len(g) for g, _ in SUMMARY)
     print('\n%-*s   %s' % (width, 'gate', 'result'))
     print('%s   %s' % ('-' * width, '-' * 60))
@@ -4012,7 +4762,7 @@ def main():
     # Where the run left its assets. It is about 200 MB of them, which is worth saying once rather than letting a
     # caller discover it: out/ is gitignored apart from the logs that are force-added as records of a run.
     print('\nthe assets of this run are under %s (about 200 MB); out/ is gitignored except its tracked logs'
-          % os.path.join(ROOT, 'out'))
+          % os.path.join(ROOT, OUT))
     print('\nAll checks passed.')
     return 0
 

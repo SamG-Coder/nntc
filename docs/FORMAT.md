@@ -272,6 +272,11 @@ level 0's mip 0. So:
 > **Level 1 must be sampled with both UV gradients scaled by `2^lod_bias_level1` (= 4)**, i.e. through `SampleGrad` /
 > `textureGrad` with `ddx(uv) * 4` and `ddy(uv) * 4`.
 
+Level 0 should go through the same explicit-gradient path, with `ddx(uv)` and `ddy(uv)` unscaled, so that the two
+latents are filtered the same way: an implementation may treat an implicit sample and an explicit-gradient one
+differently (Mesa's llvmpipe gives only the implicit one anisotropy), and the decoder was fitted on two latents
+filtered alike.
+
 Scaling both gradients by `s` raises the LOD the hardware computes by exactly `log2(s)` BEFORE any clamp, so level 1's
 LOD equals level 0's at every distance; at 1:1 on screen it goes from -2 to 0, still mip 0, so nothing changes at the
 base. It is still one ordinary hardware sample, and anisotropic filtering still runs, at a cost: an anisotropic

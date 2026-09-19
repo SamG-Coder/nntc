@@ -59,15 +59,18 @@ void decode_nntc(vec4 z0, vec4 z1, out float outv[18]) {
 }
 
 void main() {
-    vec4 s0 = texture(sampler2D(lat0, samp), v_uv);    // the uncompressed level 0, or a BC4 / BC5 (its channels in .rg)
-    if (cb.sel.z == 2) s0.zw = texture(sampler2D(lat0b, samp), v_uv).rg;   // channels 2-3 from the second file; at C0 3 only .r is read below
+    // Both latents are read through the same explicit-gradient path, so every implementation filters them alike
+    // (an implicit texture() beside a textureGrad() may not be: llvmpipe gives only the implicit one anisotropy).
+    const vec2 dx = dFdx(v_uv), dy = dFdy(v_uv);
+    vec4 s0 = textureGrad(sampler2D(lat0, samp), v_uv, dx, dy);    // the uncompressed level 0, or a BC4 / BC5 (its channels in .rg)
+    if (cb.sel.z == 2) s0.zw = textureGrad(sampler2D(lat0b, samp), v_uv, dx, dy).rg;   // channels 2-3 from the second file; at C0 3 only .r is read below
     // Level 1 is a quarter of level 0's size, so left alone the GPU reads it two mips finer than level 0. The encoder
     // pairs mip m of level 1 with mip m of level 0, so its UV gradients are scaled by const0.z = 2^lod_bias_level1
     // (4; 1.0 when key L turns the rule off) to keep the two in step.
     // Gradients rather than a sampler LOD bias of +2: the bias is fine on NVIDIA and AMD but blurs a magnified
     // texture badly on Intel integrated graphics; scaled gradients work on all three. README.md, "The two ways to
     // apply the level-1 mip shift", compares the two methods.
-    vec4 s1 = textureGrad(sampler2D(lat1, samp1), v_uv, dFdx(v_uv) * cb.const0.z, dFdy(v_uv) * cb.const0.z);
+    vec4 s1 = textureGrad(sampler2D(lat1, samp1), v_uv, dx * cb.const0.z, dy * cb.const0.z);
     if (cb.const0.x > 0.5) { out_colour = vec4(s0.rgb, 1.0); return; }   // level 0's texture as stored
     if (cb.const0.y > 0.5) { out_colour = vec4(s1.rgb, 1.0); return; }   // level 1's
     vec4 z0 = cb.lo0 + s0 * (cb.hi0 - cb.lo0);   // the dequantisation AFTER sampling (affine, so the blend of samples is the blend of values)

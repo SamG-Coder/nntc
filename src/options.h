@@ -162,7 +162,21 @@ struct Options
     double ridge = 1e-4;                  // --ridge X: level 1's proximal ridge, relative to mean(diag H)
     int sweeps = 2;                       // --sweeps N: level-0 coordinate sweeps when the joint enumeration is too large
     int device = 0;                       // --device N: the CUDA device index
-    int png = 1;                          // --png 0|1: write the recon and source PNGs per level
+    bool device_given = false;            // --device was named, so naming it beside a backend that has no device can
+                                          //   be called out rather than silently ignored
+    std::string backend = "auto";         // --backend auto|cuda|cpu|check: which implementation of the device
+                                          //   interface runs the encode. auto tries CUDA and falls back with a
+                                          //   WARNING; cuda asked for by name is an ERROR where it cannot be used;
+                                          //   check is the per-kernel harness (CUDA runs, the CPU is compared)
+    bool backend_given = false;           // --backend was named, which is what makes cuda a demand and not a wish
+    int threads = 0;                      // -j N: the CPU backend's worker threads. 0 means as many as the machine
+                                          //   reports, resolved when the pool is built and not here, so that the
+                                          //   number in the report is the number that ran
+    bool threads_given = false;           // -j was named, so naming it beside the CUDA backend can be called out
+    std::string kcheck_only;              // --kcheck-only NAME: under --backend check, print every call of this one
+                                          //   seam function and not only the ones that were not ok
+    bool kcheck_stop = false;             // --kcheck-stop: under --backend check, end the run at the first MISMATCH
+    int png = 0;                          // --png 0|1: write the recon and source PNGs per level
     bool check = false;                   // --check: recompute E by brute force on the host and print both
     bool diag = false;                    // --diag: the per-plane diagnosis table - every texture's psnr at every
                                           //   stored level, and every latent channel's mean / sd / min / max and the

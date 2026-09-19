@@ -257,6 +257,7 @@ struct DeviceInfo
     std::string name;
     int major = 0;
     int minor = 0;
+    std::string error;   // the CUDA runtime's words for a refusal, when it gave any (init.cu, device_select)
 };
 
 bool device_select(int index, DeviceInfo& info);

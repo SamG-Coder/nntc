@@ -495,6 +495,17 @@ covariance is 6x6 and all four level-1 channels get a real direction, 35.29 / 36
 No image is hurt by either, so the default is the one that needs no eigenbasis to explain, and `--init pca` is one flag
 away for the image that likes it.
 
+**A grayscale first texture.** Box reads source channels 0 .. `C1`-1 in order, and a gray texture's G and B are exact
+copies of its R, so a gray FIRST texture would start level 1 with two or three identical channels: collinear columns
+in block (a) and a null direction in block (b) that only last-bit rounding settles, which measured as up to 5 dB
+between two builds that differ only in fused multiply-add. So the box init takes the source channels in order with
+every exact copy of an earlier channel moved behind every distinct one, and recomputes level 1 on the host only when
+that changes WHICH channels it starts from (`src/main.cpp`, right after `init_level1`); every other input is untouched
+and byte-identical. A lone gray texture has nothing else to take and is unchanged. Measured over 68 materials at four
+layouts on both CUDA builds: gray-first materials gain about 1.3 to 1.5 dB on average and the result becomes nearly
+build-independent; the losses are concentrated at `--c1 2`, where two level-1 channels now go to two different
+textures instead of two copies of one.
+
 ### 3.5 Block (c'): level 0 as a continuous 8-bit plane (`--l0 bc8`)
 
 **This is the default mode.** Level 0 ships as BC4 or BC5, and **a BC4 plane costs four bits a texel whatever the
