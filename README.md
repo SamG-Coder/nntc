@@ -94,6 +94,13 @@ it -- or with an SDK that ships no `shaderc_combined` -- CMake prints one `-- ..
 configure time, that one target is not built, everything else configures and builds exactly as before, and the release
 gate reports the Vulkan cases as skipped rather than failing them.
 
+**The Direct3D 12 viewer has an optional decode path**, off by default, which does the decode with the Shader
+Model 6.10 linear-algebra instruction instead of the shader's own loop. It is the CMake option
+`NNTC_D3D12_LINALG`, it draws the same picture, and nothing above needs it: leave it alone and the viewer builds and
+runs as described. Turning it on makes the configure fetch three preview packages from Microsoft, so it wants a
+network the first time. [`docs/D3D12_LINALG_BUILD.md`](docs/D3D12_LINALG_BUILD.md) is how to build it and what a machine
+needs before it will run.
+
 Visual Studio 2022 with CUDA 13.1 is also supported and produces byte-identical assets:
 
 ```
