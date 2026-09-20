@@ -8,17 +8,17 @@ fitted matrix coefficients**. It outputs two `.dds` textures, or three when the 
 the whole material back from **two ordinary `Sample()` calls**, or three when the full-resolution plane has three or
 four channels, and one matrix multiply of a few dozen to a few hundred multiply-accumulates per pixel for the whole
 material (the count is in [How it works](#how-it-works-briefly), below). No runtime library, no decompression at load, no neural inference: the files are standard mipmapped `.dds`
-(BC4 / BC5 and 8-bit) and a `.json` containing the fitted bilinear model's decoder coefficients. 
+(BC4 / BC5 and 8-bit) and a `.json` containing the fitted bilinear model's decoder coefficients.
 
-The [VK_NV_cooperative_vector](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_cooperative_vector.html) extension is supported in the Vulkan viewer for potentially faster decoding. The D3D 12 viewer optionally supports the [the Linear Algebra Runtime](https://microsoft.github.io/DirectX-Specs/d3d/D3D12LinearAlgebraRuntimeFeatureSupport.html).
+The [VK_NV_cooperative_vector](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_cooperative_vector.html) extension is supported in the Vulkan viewer for potentially faster decoding. The D3D 12 viewer optionally supports the [Linear Algebra Runtime](https://microsoft.github.io/DirectX-Specs/d3d/D3D12LinearAlgebraRuntimeFeatureSupport.html).
 
 NNTC is a generalized latent/modulation codec, in the same broad family of ideas as PVRTC1, but with more latent dimensions and a fitted bilinear decoder. It builds directly off the author's [public Prior Art texture work from 2012](https://web.archive.org/web/20201024153426/https://sites.google.com/site/richgel99/luma_chroma_texture_compression). It uses a bilinear/degree-2 polynomial decoder, i.e. a degree-2 polynomial whose only quadratic terms are the products between the two latents stored as standard BC4/BC5/uncompressed mipmapped textures. The full-resolution latent texture(s) represent edge/detail information, while the quarter-resolution latent texture represents slowly varying material/colour state.
 
-The `nntc_view` tool is a Windows D3D11 viewer, which runs on any GPU, that loads the .json and .dds files and displays the sampled and decoded results on a textured quad or a cube, with keyboard camera controls. `nntc_view_vk` is the Vulkan viewer, which also runs on any GPU, with the same window and keys, for Windows and Linux (`viewer_vk/README.md`); `nntc_view_d3d12` is the Windows Direct3D 12 viewer.
+The `nntc_view` tool is a Windows D3D11 viewer, which runs on any GPU, that loads the .json and .dds files and displays the sampled and decoded results on a textured quad or a cube, with keyboard camera controls. `nntc_view_vk` is the Vulkan viewer, which also runs on any GPU, with the same window and keys, for Windows and Linux ([`viewer_vk/README.md`](viewer_vk/README.md)); `nntc_view_d3d12` is the Windows Direct3D 12 viewer.
 
 Importantly, this method is compatible with normal GPU texture hardware bilinear, trilinear, and anisotropic filtering. The encoder ensures the encoded latents and the fitted coefficients are compatible with hardware filtering. The bottom line: NNTC enables large runtime and distribution memory savings due to packing 2-6 correlated material textures into a single set of latent textures, which are sampled normally and then decoded by a small pixel shader function.
 
-A Prior Art Disclosure, dated September 13, 2026, is [here](https://github.com/richgel999/nntc/blob/main/PRIOR_ART_DISCLOSURE.md).
+A Prior Art Disclosure, dated September 13, 2026, is [here](PRIOR_ART_DISCLOSURE.md).
 
 ## What it does
 
@@ -52,7 +52,7 @@ A Prior Art Disclosure, dated September 13, 2026, is [here](https://github.com/r
   it is path-dependent, so a last-bit difference can settle it in a different optimum, and on the hardest material
   tested (four channels in each latent) that was up to about a decibel on a texture. The assets decode on any GPU either
   way (using plain pixel shaders).
-* **Encode Quality**: The encoder fits the output for the hardware filter, not for texel by texel decoding, so the method is compatible with standard bilinear, trilinear and anisotropic sampling. `docs/RESULTS.md` has the measurements.
+* **Encode Quality**: The encoder fits the output for the hardware filter, not for texel by texel decoding, so the method is compatible with standard bilinear, trilinear and anisotropic sampling. [`docs/RESULTS.md`](docs/RESULTS.md) has the measurements.
 
 ## Building
 
@@ -86,7 +86,7 @@ cmake --build build --config Release
 ```
 
 That produces `build\Release\nntc_encode.exe`, `nntc_view.exe`, `nntc_view_d3d12.exe` and `bc_check.exe`,
-and -- when the Vulkan SDK is installed -- `nntc_view_vk.exe`, the Vulkan viewer (`viewer_vk/README.md`).
+and -- when the Vulkan SDK is installed -- `nntc_view_vk.exe`, the Vulkan viewer ([`viewer_vk/README.md`](viewer_vk/README.md)).
 
 **The Vulkan SDK is optional.** It is what `find_package(Vulkan)` needs to find a loader and a `shaderc_combined`,
 which is how that viewer compiles its GLSL at runtime; this tree was built and measured against SDK 1.4.357.0. Without
@@ -170,7 +170,7 @@ older stops at a `#error` naming the package to install.
 Notes: A run whose mipmaps come from `stb_image_resize2` (a named filter, or the `box` implied by `srgb`, `edge` or
 `normal_map`) can differ
 in the last bit between platforms, so those runs agree across platforms in PSNR rather than byte for byte
-(`docs/DESIGN.md` section 6 has the measurement). Inside WSL, prefer the `cuda-toolkit-13-x` package: the `cuda` and
+([`docs/DESIGN.md`](docs/DESIGN.md) section 6 has the measurement). Inside WSL, prefer the `cuda-toolkit-13-x` package: the `cuda` and
 `cuda-drivers` metapackages try to install a Linux driver, which WSL does not use (the driver is Windows'). Put
 `/usr/local/cuda-13.x/bin` on your PATH yourself, and do it BEFORE the first configure: with `nvcc` off the PATH the
 build does not refuse, it builds the encoder with its CPU backend only, and the probe's answer is cached, so a tree
@@ -330,16 +330,16 @@ when level 0 takes two -- samples each once per pixel and runs the decoder in th
 `--shot FILE.bmp` renders one frame and exits, with no window on the Direct3D 12 and Vulkan viewers. Each
 viewer's own README has its full key list, its flags and its shader. What belongs to each:
 
-* **Direct3D 11** (`viewer/README.md`) is the reference the other two are written against, and
+* **Direct3D 11** ([`viewer/README.md`](viewer/README.md)) is the reference the other two are written against, and
   `viewer/bin/nntc_view.hlsl` is its decode shader.
-* **Direct3D 12** (`viewer_d3d12/README.md`) compiles *the Direct3D 11 viewer's own* shader file, so the only thing
+* **Direct3D 12** ([`viewer_d3d12/README.md`](viewer_d3d12/README.md)) compiles *the Direct3D 11 viewer's own* shader file, so the only thing
   that can differ between the two Direct3D frames is the API path; it needs no Agility SDK, and every build draws a
   fifth overlay line naming the decoder that drew the frame. The linear-algebra decode -- one matrix-vector
   instruction in place of the shader's loop -- needs the CMake option `NNTC_D3D12_LINALG` and a device that
   offers it: `--linalg 0|1` and `--linalg-layout row|optimal` steer it, the key `K` switches it in that build
   alone, and `--linalg 1` anywhere else is refused rather than quietly dropped. `--bench N` times N headless frames on
-  either path. `docs/D3D12_LINALG_BUILD.md` is how to build it.
-* **Vulkan** (`viewer_vk/README.md`) is the portable path to Linux, where `--shot` runs without a desktop. Where the
+  either path. [`docs/D3D12_LINALG_BUILD.md`](docs/D3D12_LINALG_BUILD.md) is how to build it.
+* **Vulkan** ([`viewer_vk/README.md`](viewer_vk/README.md)) is the portable path to Linux, where `--shot` runs without a desktop. Where the
   device offers `VK_NV_cooperative_vector` it decodes through that extension's matrix-vector instruction instead of
   the shader's loop (`--coopvec 0|1`, the key `K`); every other device never hears of it.
 
@@ -401,7 +401,7 @@ The D3D 11 viewer has also been successfully tested on Windows ARM, Snapdragon X
 its UV gradients scaled by `2^lod_bias_level1` = 4** (`SampleGrad` / `textureGrad`), so that both textures are read
 from the same mip, and the full-resolution one through `SampleGrad` / `textureGrad` as well, with the unscaled
 gradients, so that the two are filtered the same way; a sampler LOD bias of the same value selects the same mips on hardware that keeps a negative base LOD under magnification (NVIDIA, AMD) and is the sharper picture there under anisotropic filtering, but was observed to blur a magnified picture badly on Intel Xe integrated graphics, so the gradient form is the one to ship. Everything else is
-`lo + sample * (hi - lo)` on each channel, then `out = W * [c, s, s*c] + b`. `docs/FORMAT.md` specifies the files byte
+`lo + sample * (hi - lo)` on each channel, then `out = W * [c, s, s*c] + b`. [`docs/FORMAT.md`](docs/FORMAT.md) specifies the files byte
 by byte, and `tools/dds_decode.py` is a reference decoder of about 500 lines in Python.
 
 ## Checking an asset
@@ -492,8 +492,8 @@ Also see:
 - [Real-Time Neural Materials using Block-Compressed Features](https://onlinelibrary.wiley.com/doi/10.1111/cgf.15013) by Weinreich et al. (2024)
 - [Hardware Accelerated Neural Block Texture Compression with Cooperative Vectors](https://arxiv.org/abs/2506.06040) by Belcour and Benyoub (2025)
 
-`docs/DESIGN.md` is
-the method, `docs/MATHEMATICS.md` the notes for whoever changes it, `PRIOR_ART_DISCLOSURE.md` the public description.
+[`docs/DESIGN.md`](docs/DESIGN.md) is
+the method, [`docs/MATHEMATICS.md`](docs/MATHEMATICS.md) the notes for whoever changes it, [`PRIOR_ART_DISCLOSURE.md`](PRIOR_ART_DISCLOSURE.md) the public description.
 
 ## Limits
 
@@ -512,7 +512,7 @@ the method, `docs/MATHEMATICS.md` the notes for whoever changes it, `PRIOR_ART_D
 
 | path | licence |
 |---|---|
-| everything that is not third-party code: `src/` (except the three stb headers), `shared/` (except `shared/json.h`), `tools/`, `tests/`, `docs/`, `CMakeLists.txt`, the READMEs, `PRIOR_ART_DISCLOSURE.md`, `viewer/main.cpp`, `viewer/bin/nntc_view.hlsl`, `viewer/bc_check.cpp`, `viewer_vk/`, `viewer_d3d12/` | **Apache License 2.0**, Copyright (C) 2026 Richard Geldreich Jr. ([`LICENSE`](https://github.com/richgel999/nntc/blob/main/LICENSE)) |
+| everything that is not third-party code: `src/` (except the three stb headers), `shared/` (except `shared/json.h`), `tools/`, `tests/`, `docs/`, `CMakeLists.txt`, the READMEs, `PRIOR_ART_DISCLOSURE.md`, `viewer/main.cpp`, `viewer/bin/nntc_view.hlsl`, `viewer/bc_check.cpp`, `viewer_vk/`, `viewer_d3d12/` | **Apache License 2.0**, Copyright (C) 2026 Richard Geldreich Jr. ([`LICENSE`](LICENSE)) |
 | `shared/json.h` | public domain (Unlicense), [sheredom](https://github.com/sheredom/json.h) |
 | `viewer/bcdec.h` | MIT / Unlicense dual, [iOrange](https://github.com/iOrange/bcdec) |
 | `src/stb_image.h`, `src/stb_image_write.h`, `src/stb_image_resize2.h` | public domain / MIT dual, [Sean Barrett](https://github.com/nothings/stb) |

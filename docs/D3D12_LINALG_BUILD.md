@@ -6,7 +6,7 @@ of that shader with those loops replaced by one such call. It answers one questi
 instruction draw the same picture as the loop?
 
 **The option is OFF by default and you need none of this to use the viewer.** A build without it is the viewer
-`viewer_d3d12/README.md` describes -- no preview package, no Agility SDK, no Developer Mode, the same frames byte for
+[`viewer_d3d12/README.md`](../viewer_d3d12/README.md) describes -- no preview package, no Agility SDK, no Developer Mode, the same frames byte for
 byte. The plain path is the product. Everything here is for someone who wants the extra path as well.
 
 ## What you need to build
@@ -88,7 +88,7 @@ owner of the machine turns it on.
 
 No other card, driver, architecture or vendor has been tried, and the feature itself is a draft (see the end of this
 file). A device that answers the query is expected to work and is not known to; if yours does something else, that is
-worth reporting rather than working around, and `viewer_d3d12/PHASE_B_NOTES.md` is written for exactly that.
+worth reporting rather than working around, and [`viewer_d3d12/PHASE_B_NOTES.md`](../viewer_d3d12/PHASE_B_NOTES.md) is written for exactly that.
 
 ## Check it worked
 
@@ -155,12 +155,12 @@ driver the query reports tier 1.0 and the run prints `decode: linear algebra`.
 `--linalg-layout row|optimal` chooses between the host's row-major fp16 matrix and the device's own multiply-optimal
 layout through `ConvertLinearAlgebraMatrix`; they are different buffers read by two different loads and draw
 byte-identical frames. `python tests\run_checks.py` runs this comparison and several more. `--bench N` times the scene
-draw and is informational; nothing in this tree depends on it. `viewer_d3d12/README.md` holds the full table with the
+draw and is informational; nothing in this tree depends on it. [`viewer_d3d12/README.md`](../viewer_d3d12/README.md) holds the full table with the
 per-channel means.
 
 ## When it does not work
 
-`viewer_d3d12/PHASE_B_NOTES.md` is the diagnosis guide: the detection chain step by step, the exact line each step
+[`viewer_d3d12/PHASE_B_NOTES.md`](../viewer_d3d12/PHASE_B_NOTES.md) is the diagnosis guide: the detection chain step by step, the exact line each step
 prints, what each answer means, and what to look at when the picture misses the bar. Three cases belong here because
 they are the build's and not the device's.
 
@@ -286,8 +286,8 @@ change to test, not a change to assume.
 
 ### Further reading
 
-* `viewer_d3d12/PHASE_B_NOTES.md` -- the diagnosis guide, for a machine where the path does not work.
-* `D3D12_LINEAR_ALGEBRA_PLAN.md` beside this file -- the design record.
+* [`viewer_d3d12/PHASE_B_NOTES.md`](../viewer_d3d12/PHASE_B_NOTES.md) -- the diagnosis guide, for a machine where the path does not work.
+* [`D3D12_LINEAR_ALGEBRA_PLAN.md`](D3D12_LINEAR_ALGEBRA_PLAN.md) beside this file -- the design record.
 * The runtime feature specification:
   <https://microsoft.github.io/DirectX-Specs/d3d/D3D12LinearAlgebraRuntimeFeatureSupport.html>
 * HLSL proposal 0035, the matrix type and `MultiplyAdd`:
