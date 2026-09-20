@@ -682,7 +682,7 @@ quality costs nothing and rate is not a column in any table.
 | `bc8` vs 4-bit palette at equal memory, eight pairs, one binary on both sides | wins all eight, +0.94 to +4.10 dB |
 | BC refinement + outer passes, eight runs | 32-71 % of the pack's `E` cost recovered, +0.11 to +2.97 dB |
 | frozen grid + quantised sweeps vs round-at-end, 4-bit level 1 | +6.08 and +7.11 dB (development measurement, `docs/DESIGN.md` 5.2, no log in the tree) |
-| independent Python reader vs encoder report | equal at every level; worst |published - sampled| grid value 1.7e-08 |
+| independent Python reader vs encoder report | equal at every level; worst \|published - sampled\| grid value 1.7e-08 |
 | BC pack at 3 bits | lossless (packing PSNR 154.80 dB, max err 6.5e-06/255) |
 | determinism | byte-identical `.dds` and `_nntc.json` across reruns (gate) |
 | level-1 mip shift, sampler bias against scaled gradients, anisotropic, close steep views against 16x supersampling | bias ahead by 3 to 7 dB (RTX 5090, integrated Radeon); equal square-on or with anisotropy off (`README.md`) |

@@ -5,7 +5,7 @@ design, the stages and the reasoning behind every choice in it are `../docs/VULK
 exists today and how to build it.
 
 Why a second viewer at all: the format's claim is that the representation is valid under **the** hardware sampling
-operator, not under one vendor's, and a second graphics api on the same asset is the cheapest evidence there is that
+operator, not under one vendor's, and a second graphics API on the same asset is the cheapest evidence there is that
 the claim is about hardware and not about Direct3D. Vulkan is also the portable path to Linux, where the encoder
 already builds and where nothing can currently be looked at.
 
@@ -36,7 +36,8 @@ What is here, level by level:
   addressing throughout, and a line at load if the device's `maxSamplerLodBias` is below what the descriptor asks for;
 * one uniform buffer of 2032 bytes holding the other viewer's two constant blocks end to end, and a descriptor set of
   separate sampled images and samplers, so that a key rewrites one sampler descriptor and nothing else;
-* `bin/view.vert` and `bin/view.frag`, copied beside the executable by the build, compiled at runtime by `shaderc`
+* `bin/view.vert`, `bin/view.frag` and `bin/view_coopvec.frag`, copied beside the executable by every build (edit them
+  here, not the copies), compiled at runtime by `shaderc`
   **from beside the executable and from nowhere else**, and re-read from that same place by key `R` -- the path is
   printed on every compile. The fragment
   shader is a transliteration of `../viewer/bin/nntc_view.hlsl`'s `DecodeNNTC` and `PSMain`, line for line: the feature
@@ -130,7 +131,7 @@ build\Release\nntc_view_vk.exe examples\m1_m4_c0_3_c1_4_nntc.json --device 1
 | `--nooverlay` | draw the scene without the debug strip, so two `--shot` frames can be compared byte for byte |
 | `--size W H` | the `--shot` frame's size, 2560x1440 by default, and the window's, 1280x720 by default; the window is resizable and the picture follows (see below) |
 | `--device N` | draw on physical device `N` rather than on the first discrete GPU that can present |
-| `--coopvec 0|1` | the decode through `VK_NV_cooperative_vector` or through the plain GLSL multiply (the key `K`). On by default where the device offers it; `--coopvec 1` where it does not is refused. See the last section |
+| `--coopvec 0\|1` | the decode through `VK_NV_cooperative_vector` or through the plain GLSL multiply (the key `K`). On by default where the device offers it; `--coopvec 1` where it does not is refused. See the last section |
 | `--bench N` | render `N` frames headless and print the mean and the minimum GPU time of the scene draw, in microseconds, for the current decode path. Writes no file |
 | `--help`, `-h` | the usage, exit 0 |
 
@@ -163,8 +164,8 @@ The same four-line debug strip, drawn with the same 8x8 font at the same scale i
 3. **the camera**: x, y, z, yaw, pitch;
 4. **the keys**, as a reminder line.
 
-It is rasterised on the cpu into one `OVL_W x OVL_H` RGBA buffer -- that part is the other viewer's code, because
-nothing about a bitmap font is api-specific -- copied into an image at the top of the frame's command buffer when the
+It is rasterised on the CPU into one `OVL_W x OVL_H` RGBA buffer -- that part is the other viewer's code, because
+nothing about a bitmap font is API-specific -- copied into an image at the top of the frame's command buffer when the
 text has changed, and drawn as one alpha-blended quad by a second pipeline whose two shaders are string constants. At
 the Direct3D frame's own size the strip's 84 rows are **byte-identical** to that viewer's, and the rows below them are
 the same as each viewer's own `--nooverlay` frame -- which is as close to "the same overlay" as two programs get, and

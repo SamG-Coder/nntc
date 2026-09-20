@@ -270,9 +270,11 @@ if(WIN32)
     endif()
 
     # The viewer compiles nntc_view.hlsl at runtime from the working directory or from beside the executable, so the
-    # shader travels with the build (edit it and press R to reload). The copy is its own target, run on every build
-    # (copy_if_different makes an unchanged shader a no-op), rather than a post-build step: a post-build step runs only
-    # when the executable relinks, so a change to the shader alone left a stale copy beside it.
+    # shader travels with the build: edit viewer/bin/nntc_view.hlsl, build, and press R. An edit made to the copy beside
+    # the executable lasts only until the next build overwrites it. The copy is its own target, run on every build
+    # (copy_if_different makes an unchanged shader a no-op), rather than a post-build step: with a Makefile or Ninja
+    # generator a post-build step runs only when the executable relinks, so a change to the shader alone left a stale
+    # copy beside it.
     add_custom_target(nntc_view_shader ALL
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nntc_view>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -280,6 +282,183 @@ if(WIN32)
                 "$<TARGET_FILE_DIR:nntc_view>/nntc_view.hlsl"
         VERBATIM)
     add_dependencies(nntc_view nntc_view_shader)
+
+    # The third viewer: the same asset on Direct3D 12 (docs/D3D12_LINEAR_ALGEBRA_PLAN.md part I). It compiles the SAME
+    # viewer/bin/nntc_view.hlsl to the same vs_5_0 / ps_5_0 DXBC through the same d3dcompiler, so the two Direct3D
+    # viewers hand their drivers the same bytes and any difference between their frames is in the api path, which is the
+    # thing it exists to check. Nothing preview is involved: d3d12 and dxgi are the Windows SDK's, there is no Agility
+    # SDK and no shader model past 5.0, so it builds and runs wherever nntc_view does.
+    add_executable(nntc_view_d3d12 viewer_d3d12/main.cpp shared/bc_pack.h shared/nntc_json.h shared/json.h shared/dds.h)
+    target_sources(nntc_view_d3d12 PRIVATE ${NNTC_MANIFEST})
+    target_include_directories(nntc_view_d3d12 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shared)
+    target_link_libraries(nntc_view_d3d12 PRIVATE d3d12 dxgi d3dcompiler)
+    if(MSVC)
+        target_compile_definitions(nntc_view_d3d12 PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_compile_options(nntc_view_d3d12 PRIVATE /W4)
+    else()
+        target_compile_options(nntc_view_d3d12 PRIVATE -Wall -Wextra)
+    endif()
+
+    # It reads nntc_view.hlsl from BESIDE THE EXECUTABLE and from nowhere else (the Vulkan viewer's rule: a stray shader
+    # in the working directory must not be the one that is compiled), so the copy is not optional for it. With a
+    # multi-config generator this is the same directory nntc_view's copy lands in and copy_if_different makes the second
+    # copy a no-op; with a single-config one they can differ, which is why it is its own target rather than a shared one.
+    add_custom_target(nntc_view_d3d12_shader ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nntc_view_d3d12>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/viewer/bin/nntc_view.hlsl"
+                "$<TARGET_FILE_DIR:nntc_view_d3d12>/nntc_view.hlsl"
+        VERBATIM)
+    add_dependencies(nntc_view_d3d12 nntc_view_d3d12_shader)
+
+    # -----------------------------------------------------------------------------------------------------------------
+    # PHASE B, and it is OFF BY DEFAULT: the optional Shader Model 6.10 linear-algebra decode path
+    # (docs/D3D12_LINEAR_ALGEBRA_PLAN.md part II, viewer_d3d12/PHASE_B_NOTES.md).
+    #
+    # OFF, nntc_view_d3d12 is exactly what it is above: the Windows SDK's Direct3D 12, no NuGet package, no
+    # D3D12SDKVersion export, nothing preview anywhere in the build, and the same frames byte for byte.
+    #
+    # ON, three PREVIEW NuGet packages are fetched at pinned versions into the BUILD directory - never into the source
+    # tree and never onto the machine - and their binaries are copied beside the executable. The .nupkg files are
+    # ordinary zip archives, so they are fetched with file(DOWNLOAD) and unpacked with file(ARCHIVE_EXTRACT) rather than
+    # through nuget.exe, which would be a fourth download for nothing. A configure with no network prints a WARNING
+    # naming what it wanted and builds the viewer WITHOUT the path, in this tree's style: the plain decode is the
+    # product and a missing preview package must never fail a build.
+    # -----------------------------------------------------------------------------------------------------------------
+    option(NNTC_D3D12_LINALG "Build nntc_view_d3d12 with the optional Shader Model 6.10 linear-algebra decode path (fetches three preview NuGet packages)" OFF)
+    if(NNTC_D3D12_LINALG)
+        # The pins. They are Microsoft's own sample's, and the runtime specification they implement is a 0.9 draft: when
+        # it reaches 1.0 these three lines and the plan's section B.1.1 are re-read against it.
+        set(NNTC_LINALG_AGILITY_VERSION "1.721.3-preview")
+        set(NNTC_LINALG_DXC_VERSION     "1.10.2605.37-preview")
+        set(NNTC_LINALG_WARP_VERSION    "1.65535.20-preview")
+        set(NNTC_LINALG_ROOT "${CMAKE_BINARY_DIR}/nntc_linalg_packages")
+
+        # Which of the packages' architecture folders this build wants. A 32-bit build is refused by name rather than
+        # half-configured: the packages do publish a win32 folder, but nothing else in this tree is built 32-bit and an
+        # untested arm of an optional preview path is not worth carrying.
+        set(NNTC_LINALG_ARCH "x64")
+        if(CMAKE_VS_PLATFORM_NAME MATCHES "^([Aa][Rr][Mm]64)$" OR CMAKE_SYSTEM_PROCESSOR MATCHES "^([Aa][Rr][Mm]64)$")
+            set(NNTC_LINALG_ARCH "arm64")
+        endif()
+
+        set(NNTC_LINALG_OK TRUE)
+        if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+            message(WARNING "NNTC_D3D12_LINALG is ON and this is a 32-bit build; the linear-algebra path is built for "
+                            "x64 and arm64 only, so nntc_view_d3d12 is built WITHOUT it")
+            set(NNTC_LINALG_OK FALSE)
+        endif()
+        foreach(NNTC_PKG "microsoft.direct3d.d3d12:${NNTC_LINALG_AGILITY_VERSION}"
+                         "microsoft.direct3d.dxc:${NNTC_LINALG_DXC_VERSION}"
+                         "microsoft.direct3d.warp:${NNTC_LINALG_WARP_VERSION}")
+            string(REPLACE ":" ";" NNTC_PKG_PARTS "${NNTC_PKG}")
+            list(GET NNTC_PKG_PARTS 0 NNTC_PKG_ID)
+            list(GET NNTC_PKG_PARTS 1 NNTC_PKG_VER)
+            set(NNTC_PKG_DIR "${NNTC_LINALG_ROOT}/${NNTC_PKG_ID}.${NNTC_PKG_VER}")
+            # An unpacked package is kept: the three of them are a hundred megabytes and re-running cmake must not
+            # fetch them again. Deleting the build directory is what re-fetches them.
+            if(NOT EXISTS "${NNTC_PKG_DIR}/build/native")
+                set(NNTC_PKG_URL "https://api.nuget.org/v3-flatcontainer/${NNTC_PKG_ID}/${NNTC_PKG_VER}/${NNTC_PKG_ID}.${NNTC_PKG_VER}.nupkg")
+                message(STATUS "nntc_view_d3d12: fetching ${NNTC_PKG_ID} ${NNTC_PKG_VER}")
+                file(DOWNLOAD "${NNTC_PKG_URL}" "${NNTC_LINALG_ROOT}/${NNTC_PKG_ID}.${NNTC_PKG_VER}.nupkg"
+                     STATUS NNTC_PKG_STATUS INACTIVITY_TIMEOUT 60)
+                list(GET NNTC_PKG_STATUS 0 NNTC_PKG_CODE)
+                if(NNTC_PKG_CODE EQUAL 0)
+                    file(ARCHIVE_EXTRACT INPUT "${NNTC_LINALG_ROOT}/${NNTC_PKG_ID}.${NNTC_PKG_VER}.nupkg"
+                         DESTINATION "${NNTC_PKG_DIR}")
+                else()
+                    list(GET NNTC_PKG_STATUS 1 NNTC_PKG_WHY)
+                    message(WARNING "nntc_view_d3d12: ${NNTC_PKG_URL} could not be fetched (${NNTC_PKG_WHY})")
+                    set(NNTC_LINALG_OK FALSE)
+                endif()
+            endif()
+        endforeach()
+
+        set(NNTC_LINALG_AGILITY "${NNTC_LINALG_ROOT}/microsoft.direct3d.d3d12.${NNTC_LINALG_AGILITY_VERSION}/build/native")
+        set(NNTC_LINALG_DXC "${NNTC_LINALG_ROOT}/microsoft.direct3d.dxc.${NNTC_LINALG_DXC_VERSION}/build/native")
+        set(NNTC_LINALG_WARP "${NNTC_LINALG_ROOT}/microsoft.direct3d.warp.${NNTC_LINALG_WARP_VERSION}/build/native")
+        foreach(NNTC_LINALG_FILE "${NNTC_LINALG_AGILITY}/include/d3d12.h"
+                                 "${NNTC_LINALG_AGILITY}/bin/${NNTC_LINALG_ARCH}/D3D12Core.dll"
+                                 "${NNTC_LINALG_DXC}/include/dxcapi.h"
+                                 "${NNTC_LINALG_DXC}/include/hlsl/dx/linalg.h"
+                                 "${NNTC_LINALG_DXC}/bin/${NNTC_LINALG_ARCH}/dxcompiler.dll"
+                                 "${NNTC_LINALG_DXC}/bin/${NNTC_LINALG_ARCH}/dxil.dll"
+                                 "${NNTC_LINALG_WARP}/bin/${NNTC_LINALG_ARCH}/d3d10warp.dll")
+            if(NOT EXISTS "${NNTC_LINALG_FILE}")
+                message(WARNING "nntc_view_d3d12: ${NNTC_LINALG_FILE} is not there")
+                set(NNTC_LINALG_OK FALSE)
+            endif()
+        endforeach()
+
+        if(NOT NNTC_LINALG_OK)
+            message(WARNING "NNTC_D3D12_LINALG is ON and the preview packages could not be prepared, so nntc_view_d3d12 "
+                            "is built WITHOUT the linear-algebra path (everything else is unaffected). It needs "
+                            "Microsoft.Direct3D.D3D12 ${NNTC_LINALG_AGILITY_VERSION}, Microsoft.Direct3D.DXC "
+                            "${NNTC_LINALG_DXC_VERSION} and Microsoft.Direct3D.WARP ${NNTC_LINALG_WARP_VERSION} for "
+                            "${NNTC_LINALG_ARCH}, fetched from api.nuget.org into ${NNTC_LINALG_ROOT}; a machine with no "
+                            "network can unpack the three .nupkg files there by hand and configure again")
+        else()
+            # The Agility SDK's headers go FIRST on the include path, which is what makes <d3d12.h> the preview one.
+            target_include_directories(nntc_view_d3d12 BEFORE PRIVATE
+                "${NNTC_LINALG_AGILITY}/include" "${NNTC_LINALG_DXC}/include")
+            # dxcompiler.lib is deliberately NOT linked: main.cpp loads dxcompiler.dll by hand, so an executable copied
+            # away from the files below still runs and still draws the plain path instead of failing in the loader.
+            target_compile_definitions(nntc_view_d3d12 PRIVATE NNTC_D3D12_LINALG=1)
+            target_sources(nntc_view_d3d12 PRIVATE viewer_d3d12/bin/nntc_view_linalg.hlsl)
+            set_source_files_properties(viewer_d3d12/bin/nntc_view_linalg.hlsl PROPERTIES HEADER_FILE_ONLY TRUE)
+
+            # What has to sit beside the executable, and WHERE, which is not all one place:
+            #   D3D12\D3D12Core.dll and D3D12\d3d12SDKLayers.dll - the folder the D3D12SDKPath export names;
+            #   d3d10warp.dll BESIDE THE EXECUTABLE - which is where the WARP package's own .targets file puts it, and
+            #     where it has to be: a copy of it under D3D12\ is NOT picked up, and the run then gets the system
+            #     WARP, which answers Shader Model 6.8 and linear algebra tier 0 (measured; the plan expected the
+            #     D3D12\ folder and was wrong about this one file);
+            #   dxcompiler.dll and dxil.dll - the preview compiler and its signing library;
+            #   dx\linalg.h and nntc_view_linalg.hlsl - what that compiler reads at run time.
+            add_custom_target(nntc_view_d3d12_linalg ALL
+                COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nntc_view_d3d12>/D3D12"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nntc_view_d3d12>/dx"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${NNTC_LINALG_AGILITY}/bin/${NNTC_LINALG_ARCH}/D3D12Core.dll"
+                        "$<TARGET_FILE_DIR:nntc_view_d3d12>/D3D12/D3D12Core.dll"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${NNTC_LINALG_AGILITY}/bin/${NNTC_LINALG_ARCH}/d3d12SDKLayers.dll"
+                        "$<TARGET_FILE_DIR:nntc_view_d3d12>/D3D12/d3d12SDKLayers.dll"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${NNTC_LINALG_WARP}/bin/${NNTC_LINALG_ARCH}/d3d10warp.dll"
+                        "$<TARGET_FILE_DIR:nntc_view_d3d12>/d3d10warp.dll"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${NNTC_LINALG_DXC}/bin/${NNTC_LINALG_ARCH}/dxcompiler.dll"
+                        "$<TARGET_FILE_DIR:nntc_view_d3d12>/dxcompiler.dll"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${NNTC_LINALG_DXC}/bin/${NNTC_LINALG_ARCH}/dxil.dll"
+                        "$<TARGET_FILE_DIR:nntc_view_d3d12>/dxil.dll"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${NNTC_LINALG_DXC}/include/hlsl/dx/linalg.h"
+                        "$<TARGET_FILE_DIR:nntc_view_d3d12>/dx/linalg.h"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${CMAKE_CURRENT_SOURCE_DIR}/viewer_d3d12/bin/nntc_view_linalg.hlsl"
+                        "$<TARGET_FILE_DIR:nntc_view_d3d12>/nntc_view_linalg.hlsl"
+                VERBATIM)
+            add_dependencies(nntc_view_d3d12 nntc_view_d3d12_linalg)
+            # The same files again, for the install rules at the end of this file. They are named here, inside the
+            # branch where the packages are known to be present, and that is what makes those rules inert everywhere
+            # else: unset variables, so the install block's own test fails. Shipping them is not optional packaging
+            # in any case: the executable's D3D12SDKVersion export names this
+            # runtime, so an installed copy without D3D12\D3D12Core.dll beside it gets NO DEVICE AT ALL - not the
+            # plain path, no device - which is exactly the trap PHASE_B_NOTES.md warns a reader about.
+            set(NNTC_LINALG_INSTALL_D3D12 "${NNTC_LINALG_AGILITY}/bin/${NNTC_LINALG_ARCH}/D3D12Core.dll"
+                                          "${NNTC_LINALG_AGILITY}/bin/${NNTC_LINALG_ARCH}/d3d12SDKLayers.dll")
+            set(NNTC_LINALG_INSTALL_BIN "${NNTC_LINALG_WARP}/bin/${NNTC_LINALG_ARCH}/d3d10warp.dll"
+                                        "${NNTC_LINALG_DXC}/bin/${NNTC_LINALG_ARCH}/dxcompiler.dll"
+                                        "${NNTC_LINALG_DXC}/bin/${NNTC_LINALG_ARCH}/dxil.dll"
+                                        "${CMAKE_CURRENT_SOURCE_DIR}/viewer_d3d12/bin/nntc_view_linalg.hlsl")
+            set(NNTC_LINALG_INSTALL_DX "${NNTC_LINALG_DXC}/include/hlsl/dx/linalg.h")
+            message(STATUS "nntc_view_d3d12: the linear-algebra path is compiled IN (Agility ${NNTC_LINALG_AGILITY_VERSION}, "
+                           "DXC ${NNTC_LINALG_DXC_VERSION}, WARP ${NNTC_LINALG_WARP_VERSION}, ${NNTC_LINALG_ARCH}); whether "
+                           "it RUNS is still Developer Mode and the device's own query")
+        endif()
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -430,12 +609,14 @@ else()
     endif()
 
     # The GLSL files travel with the build and are compiled at runtime from BESIDE THE EXECUTABLE and from nowhere
-    # else: edit the copy this command writes and the next run, or the key R, picks it up. The viewer used to look in
-    # the working directory first, where a stray view.frag silently replaced the real one, so this copy is now the
-    # only file it can read. The copies are their own target, run on every build, as for nntc_view.hlsl above: a
-    # post-build copy ran only when the executable relinked, and a shader-only change stayed behind.
+    # else: edit the file in viewer_vk/bin/, build, and press R; an edit made to the copy itself lasts only until the
+    # next build overwrites it. The viewer used to look in the working directory first, where a stray view.frag
+    # silently replaced the real one, so this copy is now the only file it can read. The copies are their own target,
+    # run on every build, as for nntc_view.hlsl above: with a Makefile or Ninja generator a post-build copy ran only when
+    # the executable relinked, and a shader-only change stayed behind.
+    set(NNTC_VK_SHADERS view.vert view.frag view_coopvec.frag)
     set(NNTC_VK_SHADER_COPY_COMMANDS COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:nntc_view_vk>")
-    foreach(NNTC_VK_SHADER view.vert view.frag view_coopvec.frag)
+    foreach(NNTC_VK_SHADER ${NNTC_VK_SHADERS})
         list(APPEND NNTC_VK_SHADER_COPY_COMMANDS COMMAND ${CMAKE_COMMAND} -E copy_if_different
              "${CMAKE_CURRENT_SOURCE_DIR}/viewer_vk/bin/${NNTC_VK_SHADER}"
              "$<TARGET_FILE_DIR:nntc_view_vk>/${NNTC_VK_SHADER}")
@@ -448,14 +629,24 @@ endif()
 # Install: every program that was built, and beside each viewer the shader files it reads from beside itself, so that
 # `cmake --install build --prefix DIR` gives a DIR/bin that runs from anywhere; the build tree runs as it is too.
 # ---------------------------------------------------------------------------------------------------------------------
-foreach(NNTC_PROGRAM nntc_encode nntc_view bc_check nntc_view_vk)
+foreach(NNTC_PROGRAM nntc_encode nntc_view nntc_view_d3d12 bc_check nntc_view_vk)
     if(TARGET ${NNTC_PROGRAM})
         install(TARGETS ${NNTC_PROGRAM} RUNTIME DESTINATION bin)
     endif()
 endforeach()
-if(TARGET nntc_view)
-    install(FILES viewer/bin/nntc_view.hlsl DESTINATION bin)
+if(TARGET nntc_view OR TARGET nntc_view_d3d12)
+    install(FILES viewer/bin/nntc_view.hlsl DESTINATION bin)   # one file, read by both Direct3D viewers
+endif()
+if(TARGET nntc_view_d3d12 AND NNTC_LINALG_INSTALL_BIN)
+    # The preview runtime travels with the installed Direct3D 12 viewer, in the build tree's own layout: the two
+    # Agility files under D3D12\, which is the folder the executable's D3D12SDKPath export names, and d3d10warp.dll
+    # BESIDE the executable, which is the one place it is picked up from. Without them an installed copy does not
+    # fall back to the plain path - it gets no device at all.
+    install(FILES ${NNTC_LINALG_INSTALL_D3D12} DESTINATION bin/D3D12)
+    install(FILES ${NNTC_LINALG_INSTALL_BIN} DESTINATION bin)
+    install(FILES ${NNTC_LINALG_INSTALL_DX} DESTINATION bin/dx)
 endif()
 if(TARGET nntc_view_vk)
-    install(FILES viewer_vk/bin/view.vert viewer_vk/bin/view.frag viewer_vk/bin/view_coopvec.frag DESTINATION bin)
+    list(TRANSFORM NNTC_VK_SHADERS PREPEND "viewer_vk/bin/" OUTPUT_VARIABLE NNTC_VK_SHADER_FILES)
+    install(FILES ${NNTC_VK_SHADER_FILES} DESTINATION bin)
 endif()

@@ -60,7 +60,7 @@ PNG_MAGIC = bytes([137, 80, 78, 71, 13, 10, 26, 10])
 E_NOISE = 1e-8
 E_REL = 1e-6
 
-SEARCHED_DIRS = ['src', 'shared', 'tools', 'tests', 'docs', 'viewer', 'viewer_vk']
+SEARCHED_DIRS = ['src', 'shared', 'tools', 'tests', 'docs', 'viewer', 'viewer_vk', 'viewer_d3d12']
 SEARCHED_FILES = ['README.md', 'CMakeLists.txt', 'LICENSE', 'PRIOR_ART_DISCLOSURE.md']
 
 # What the run reports at the end: one row per gate, in the order they were reached.
@@ -611,9 +611,45 @@ def vulkan_viewer(build_dir):
 # added is the sentence the skip prints, because 'this machine has no such GPU' and 'this build cannot have used one'
 # are different facts about a run and a reader should not have to tell them apart from the reason string alone.
 VK_PLAIN = ['--coopvec', '0']
+# The same thing for the Direct3D 12 viewer, and for the same reason. A build made WITHOUT the CMake option
+# NNTC_D3D12_LINALG has one decode path and accepts --linalg 0 as a no-op; a build made with it takes the Shader Model
+# 6.10 path BY DEFAULT wherever the device query passes, and every arm below that is about the baseline path - the pairs
+# against the Direct3D 11 viewer, the byte-identical launches, the flag toggles, the BC pack - says so for itself. The
+# linear-algebra arms name --linalg 1 for themselves.
+D12_PLAIN = ['--linalg', '0']
 # The column the Vulkan viewer draws its decode-path token at, and the same arithmetic its main.cpp does:
 # OVL_W - 12 * 8 * FONT_SCALE, twelve characters in from the right-hand end of the 2560-pixel strip.
 VK_COOP_COLUMN = 2560 - 12 * 8 * 2
+# The Direct3D 12 overlay strip's geometry, and the same arithmetic viewer_d3d12/main.cpp does. Four lines - the ones
+# the Direct3D 11 and the Vulkan viewers draw too - come to 84 rows, and below them this viewer draws a FIFTH that says
+# in words which decoder drew the frame, at y = 4 + 4 * LINE_ADV and at the same left margin as the four above it.
+# EVERY Direct3D 12 build draws it, whether or not it was made with NNTC_D3D12_LINALG: a build with one decode path
+# says it has one. So this viewer's strip is 104 rows and the other two viewers' are 84, in every build.
+#
+# The fifth line's glyph box begins two rows ABOVE the four lines' 84, which is arithmetic and not an accident: a line
+# advances 20 rows and a glyph is 16 tall, so the fourth line's glyphs end at row 78 and leave six rows of padding.
+# The fifth line is drawn four rows into its own line rather than the usual two, so that its glyphs begin at 84 and
+# the band the three viewers share stays the whole 84 rows - asserted below over the WHOLE width, which is a great
+# deal more than the old right-hand token left it.
+D12_LINE_ADV = 20
+D12_STRIP_ROWS = 84                                   # the four lines this viewer shares with the other two
+D12_DECODE_LINE_TOP = 4 + 4 * D12_LINE_ADV            # 84: the first row the fifth line can put a pixel in
+D12_STRIP_ROWS_ALL = D12_STRIP_ROWS + D12_LINE_ADV    # 104: the whole of this viewer's strip, in every build
+D12_GLYPH_W = 8 * 2                                   # a glyph cell: 8 pixels of the font times FONT_SCALE
+D12_LINE_X = 4                                        # the left margin every line of the strip starts at
+D12_LINE_CHARS = 1280 // D12_GLYPH_W                  # 80: the characters of a line a 1280-wide window shows
+# The decode line's four wordings, exactly as viewer_d3d12/main.cpp writes them, and the state each belongs to. The
+# gate cannot read pixels back as text, but it can measure how far the line RUNS: the line starts at x = 4 and a glyph
+# cell is 16 pixels wide, so the rightmost white pixel names the last cell and therefore the number of characters
+# drawn. The four wordings are four different lengths, so that measurement says which of the four the viewer chose,
+# which is as close to reading the line as a frame gets. The device-refusal one ends in a reason whose length is the
+# device's own, so it is measured as a prefix and bounded instead.
+D12_DECODE_LINE = {
+    'linalg': 'Decode: linear algebra, through Shader Model 6.10',
+    'offered': 'Decode: plain, though this device offers linear algebra',
+    'no_build': 'Decode: plain, no linear algebra in this build',
+    'no_device': 'Decode: plain, no linear algebra - ',
+}
 
 
 def vk_shot(view, asset, out, extra, size=(640, 480)):
@@ -699,6 +735,25 @@ def vk_six_texture_arm(build_dir, desc):
     print('  the Vulkan viewer: the six --tex frames are pairwise different and --tex 6 warns and falls back to 0 '
           '(%d bytes each)' % len(frames[0]))
     return ' on both viewers'
+
+
+def d3d12_viewer(build_dir):
+    """The Direct3D 12 viewer's executable, or None when this tree did not build one.
+
+    It is None off Windows, where the CMake target is inside the WIN32 block, and on a Windows tree configured before the
+    target existed. Every case that drives it reports SKIPPED rather than failing when it is missing or when the machine
+    has no Direct3D 12 device, exactly as the Vulkan arms do, so neither viewer's coverage depends on the other.
+    """
+    for candidate in (os.path.join(build_dir, 'Release', 'nntc_view_d3d12.exe'),
+                      os.path.join(build_dir, 'nntc_view_d3d12.exe')):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def d3d12_skip_note(reason):
+    """What the summary says when the Direct3D 12 case did not run. A skipped arm must never read as a passed one."""
+    return 'skipped (%s)' % reason
 
 
 def two_file_layout(prefix, c0):
@@ -3627,6 +3682,40 @@ def bmp_rows(path, first, last, columns=None):
                     for y in range(first, last))
 
 
+def bmp_ink(path, first, last, columns=None):
+    """The overlay TEXT drawn in rows `first`..`last` of a frame, as (white pixels, leftmost, rightmost).
+
+    The debug strip's 8x8 font writes its glyphs pure white over a dark alpha blend of the scene, so the white pixels
+    in a band of rows are the line of text drawn there: how many there are says a line is drawn at all, and the
+    leftmost and rightmost of them say where it starts and how far it runs. `columns` keeps only that many pixels from
+    the left of each row, which is what a frame NARROWER than the 2560-pixel strip actually shows.
+
+    This is the one thing a comparison of two frames cannot do, and the reason it is here: a line drawn off the side of
+    the frame and a line not drawn at all are the same two frames, and for four commits that is exactly what the
+    Direct3D 12 viewer's decode-path token was. A count of ink inside the columns a monitor of a given width shows is
+    what says a line is ON SCREEN there.
+    """
+    data = open(os.path.join(ROOT, path), 'rb').read()
+    if data[:2] != b'BM' or len(data) < 54:
+        raise SystemExit('FAIL: %s is not a .bmp' % path)
+    offset = struct.unpack_from('<I', data, 10)[0]
+    width, height = struct.unpack_from('<ii', data, 18)
+    if first < 0 or last > height or first > last:
+        raise SystemExit('FAIL: rows %d..%d asked of %s, which is %d rows tall' % (first, last, path, height))
+    pitch = (width * 3 + 3) & ~3
+    keep = width if columns is None else min(width, columns)
+    count, left, right = 0, None, None
+    for y in range(first, last):
+        start = offset + (height - 1 - y) * pitch
+        row = data[start:start + keep * 3]
+        for x in range(keep):
+            if row[x * 3:x * 3 + 3] == b'\xff\xff\xff':
+                count += 1
+                left = x if left is None else min(left, x)
+                right = x if right is None else max(right, x)
+    return count, left, right
+
+
 def frame_diff(a, b, max_diff, min_psnr, what):
     """tools/frame_diff.py on two frames, refusing when either threshold is missed.
 
@@ -4216,6 +4305,738 @@ def vulkan_viewer_checks(encode, build_dir):
     print('  the Vulkan viewer: --help exits 0 and an unknown flag exits 1; the Vulkan arms took %.0f s' % seconds)
 
 
+def d3d12_viewer_checks(encode, build_dir):
+    """The Direct3D 12 viewer against the Direct3D 11 one, on the same assets, frame by frame.
+
+    This is phase A of docs/D3D12_LINEAR_ALGEBRA_PLAN.md and its section A.6 is what these arms are. The two viewers
+    compile THE SAME viewer/bin/nntc_view.hlsl with the same D3DCompileFromFile to the same vs_5_0 / ps_5_0 DXBC, so what
+    a difference between their frames can be is narrower than it was for the Vulkan pair: not a second compiler's
+    instruction selection, only the api path - descriptors, samplers, upload, LOD, rasterisation. Byte identity is
+    therefore the EXPECTATION here rather than a hope, and on this machine it is what happens in every state a --shot can
+    be put in, anisotropy on or off.
+
+    It is still not what the gate asserts. The bar is the plan's own `--max-diff 2 --min-psnr 40`, for the reasons
+    tools/frame_diff.py's header gives - fill rules, bilinear weight precision, block-compression palette evaluation and
+    anisotropic tap placement are all free to differ between two implementations of one specification - and the number
+    actually found is printed and is recorded in viewer_d3d12/README.md. The one arm pinned at 0 is the load-time BC
+    pack, where both viewers pack the same plane with the same shared/bc_pack.h and a difference of any size would mean
+    one of them packed something else.
+
+    The whole case is SKIPPED, never failed, when the executable was not built (off Windows, or a tree configured before
+    the target existed) or when the machine has no Direct3D 12 device.
+    """
+    started = time.perf_counter()
+    view = d3d12_viewer(build_dir)
+    if not view:
+        record('the Direct3D 12 viewer', d3d12_skip_note('nntc_view_d3d12 was not built; it is a Windows target'))
+        print('  the Direct3D 12 viewer: skipped, nntc_view_d3d12 is not under %s' % build_dir)
+        return
+    d3d = executable(build_dir, 'nntc_view')
+
+    odir, prefix = out_asset('tiny_d3d12')
+    proc = run([encode, os.path.join('tests', 'tiny.png'), '-o', odir, '--png', '0', '--quiet'])
+    if proc.returncode != 0:
+        raise SystemExit('FAIL: the encode for the Direct3D 12 viewer case returned %d' % proc.returncode)
+    desc = prefix + '_nntc.json'
+
+    # The first launch is also the probe: a machine with no Direct3D 12 device says so and the case is skipped, not
+    # failed. That is the phrase the viewer prints for "this machine cannot run it at all" and for nothing else.
+    single = os.path.join(OUT, 'd12_tiny_t0.bmp')
+    # No --linalg here on purpose: this probe is the one run that reports what the BUILD and the DEVICE can do, which is
+    # what the linear-algebra arms at the end of this case are keyed on.
+    probe = run([view, desc, '--nooverlay', '--shot', single])
+    if probe.returncode != 0 and 'no Direct3D 12 device' in probe.stderr:
+        # A machine with no Direct3D 12 is a skip. A LINEAR-ALGEBRA build that finds no device is something else: its
+        # D3D12SDKVersion export names a preview runtime, and when that runtime is not under D3D12\ beside the
+        # executable the Direct3D 12 runtime refuses every adapter, on a machine whose adapters are perfectly good.
+        # The viewer prints that hint and only such a build can print it, so it separates the two without guessing.
+        if "D3D12SDKVersion export" in probe.stderr:
+            raise SystemExit('FAIL: nntc_view_d3d12 was built with NNTC_D3D12_LINALG and found no Direct3D 12 device '
+                             'at all, which is its preview runtime missing from D3D12\\ beside the executable, not a '
+                             'machine without Direct3D 12: %r' % probe.stderr[-300:])
+        record('the Direct3D 12 viewer', d3d12_skip_note('this machine reports no Direct3D 12 device'))
+        print('  the Direct3D 12 viewer: skipped, no Direct3D 12 device on this machine')
+        return
+    if probe.returncode != 0:
+        raise SystemExit('FAIL: nntc_view_d3d12 --shot returned %d: %r' % (probe.returncode, probe.stderr[-300:]))
+    # That probe asked for no --size, so it also pins the default: 2560x1440, which is the Direct3D 11 viewer's window
+    # size, and 24 bits, which frame_size asserts.
+    if frame_size(single) != (2560, 1440):
+        raise SystemExit('FAIL: nntc_view_d3d12 --shot with no --size must be 2560x1440, not %dx%d' % frame_size(single))
+    print('  the Direct3D 12 viewer: --shot with no --size is a 2560x1440 24-bit frame')
+    # The adapters this viewer can actually draw on. An unusable one's line carries a disqualifier after " - " and asking
+    # for it with --device is a refusal rather than a second measurement; WARP is always the last entry.
+    devices = {}
+    for m in re.finditer(r'^device (\d+): (.*)$', probe.stdout, re.MULTILINE):
+        if ' - ' not in m.group(2):
+            devices[m.group(1)] = m.group(2).strip()
+    chosen = re.search(r'^drawing on device (\d+):', probe.stdout, re.MULTILINE)
+    if not chosen or not devices:
+        raise SystemExit('FAIL: nntc_view_d3d12 printed no adapter list and no chosen adapter: %r' % probe.stdout[:400])
+    # The decode path the run took. Phase A had one; a build with NNTC_D3D12_LINALG has two and takes the second wherever
+    # the device offers it, so both words are accepted here and the arms below assert which one each of THEM took.
+    decode_line = re.search(r'^decode: (plain|linear algebra)$', probe.stdout, re.MULTILINE)
+    if not decode_line:
+        raise SystemExit('FAIL: nntc_view_d3d12 printed no decode-path line at start-up: %r' % probe.stdout[:400])
+    print('  the Direct3D 12 viewer: %d usable adapter(s), drawing on device %s (%s), decode: %s'
+          % (len(devices), chosen.group(1), devices.get(chosen.group(1), '?'), decode_line.group(1)))
+    # What the viewer said about the optional path, in its own words. It is the VERDICT line and not the first line
+    # beginning 'linear algebra: ' - the diagnostics between them all start that way too - so it is matched on the two
+    # words that can follow. The LAST such line is the verdict and not the first: the query can say 'available' and a
+    # later step - the pipeline state, the range guard - can still take the path away, and reading the first line would
+    # send the arms below off to demand a path the run had already given up on. `la_built` is false for a build made
+    # without the CMake option, which reads like a device without the feature and is skipped the same way, with its own
+    # sentence: "this machine has no such driver" and "this build could not have used one" are different facts about a
+    # run. Every build prints one of these lines, the option-off one from its stub, so a run with no such line at all is a
+    # regression in the viewer and not something to skip past quietly.
+    la_lines = [l for l in probe.stdout.splitlines()
+                if l.startswith('linear algebra: available') or l.startswith('linear algebra: not available')]
+    if not la_lines:
+        raise SystemExit('FAIL: nntc_view_d3d12 printed no linear-algebra verdict line at start-up: %r'
+                         % probe.stdout[:400])
+    la_line = la_lines[-1]
+    la_here = la_line.startswith('linear algebra: available')
+    la_reason = la_line.split(' - ', 1)[1] if ' - ' in la_line else 'the device query did not pass'
+    la_built = 'without the CMake option' not in la_reason
+    # Reading the last line is right for the range guard, which is the ASSET's fault and not the build's: a decoder
+    # whose numbers leave fp16 is a run to skip. It would be wrong for everything else. A device that answered
+    # 'available' and then lost the path is a broken shader, a broken dxcompiler.dll or a resource that would not
+    # allocate, and before the last-line rule the gate caught all three by failing the --linalg 1 arm. So the two
+    # lines are compared: the guard's reason names fp16's limit and is skipped past, and anything else is a failure
+    # here, said in the viewer's own words.
+    # What the DEVICE answered, which is not the same question as what the run ended up doing. These two lines are
+    # printed by query_linear_algebra before anything else can go wrong, so they say "this machine can" even in a run
+    # that then lost the path for a reason of its own.
+    la_tier = re.search(r'^  linear algebra tier: 0x([0-9A-Fa-f]+) ', probe.stdout, re.MULTILINE)
+    la_sm = re.search(r'^  shader model: .* answered 0x([0-9A-Fa-f]{2})', probe.stdout, re.MULTILINE)
+    # Read as NUMBERS and compared with what the decode needs, not matched against the answers the devices here give:
+    # a device answering a tier above 1.0, or Shader Model 7, is more capable and not less, and matching on today's
+    # exact strings would have called it incapable and let a broken build skip on it.
+    la_capable = (la_tier is not None and int(la_tier.group(1), 16) >= 0x10
+                  and la_sm is not None and int(la_sm.group(1), 16) >= 0x6A)
+    # The one legitimate way a capable machine still draws the plain path: THE ASSET's decoder leaves fp16's range, so
+    # the weights would not survive the conversion. Both wordings of that refusal name 65504, and nothing else the
+    # viewer can say does - check_tree pins that, below, so a reword cannot quietly turn every skip into a failure.
+    la_asset = '65504' in la_reason
+    # The pin for that discriminator, and it has to pin the REFUSALS themselves: 65504 appears in that file eight
+    # times, in comments, in the comparisons and in the diagnostic a PASSING run prints, so counting the number alone
+    # stays satisfied with both refusals reworded - the one thing this is here to catch. Each refusal is pinned by its
+    # own words instead. They are two source literals, one of which is split across a line, so the text either side of
+    # the split is what can be matched.
+    guard_src = open(os.path.join(ROOT, 'viewer_d3d12', 'main.cpp'), encoding='utf-8', errors='replace').read()
+    for guard_phrase in ('65504, and every row', 'finite value of 65504'):
+        if guard_phrase not in guard_src:
+            raise SystemExit('FAIL: a linear-algebra range-guard refusal in viewer_d3d12/main.cpp no longer says %r. '
+                             'That refusal naming the fp16 limit of 65504 is what tells an ASSET this viewer cannot '
+                             'take from a BUILD that is broken, which is the difference between a run this gate skips '
+                             'and one it fails; this check and the rule below need a new discriminator' % guard_phrase)
+    if la_capable and not la_here and not la_asset:
+        raise SystemExit('FAIL: nntc_view_d3d12 found this machine capable - Shader Model 6.10 and linear algebra tier '
+                         '1.0 - and then lost the path for a reason that is not the asset\'s range guard, so something '
+                         'about this build is broken: %s' % la_reason)
+
+    def pair(asset, tag, extra, max_diff=2, min_psnr=40.0, device=None):
+        """One asset drawn by both Direct3D viewers at one camera, and the two frames compared.
+
+        The Direct3D 11 frame is taken first and the Direct3D 12 one is asked for that size: the Direct3D 11 --shot
+        renders into its WINDOW, which Windows clamps to the work area, and two frames of different shapes are two
+        different projections.
+        """
+        a = os.path.join(OUT, 'd12_%s_d3d11.bmp' % tag)
+        b = os.path.join(OUT, 'd12_%s_d3d12.bmp' % tag)
+        shot(d3d, asset, a, extra)
+        w, h = frame_size(a)
+        cmd = [view, asset, '--nooverlay', '--shot', b, '--size', str(w), str(h)] + extra + D12_PLAIN
+        if device is not None:
+            cmd += ['--device', str(device)]
+        made = run(cmd)
+        if made.returncode != 0:
+            raise SystemExit('FAIL: nntc_view_d3d12 --shot returned %d on %s: %r' % (made.returncode, asset,
+                                                                                     made.stderr[-300:]))
+        return frame_diff(a, b, max_diff, min_psnr, tag)
+
+    def d12_shot(asset, out, extra):
+        """shot() with this viewer's baseline decode path named, which is what every arm below is about."""
+        return shot(view, asset, out, extra + D12_PLAIN)
+
+    lines = [pair(desc, 'tiny_t0', ['--tex', '0'])]
+
+    # A material, so that a second output triple is decoded and shown: --tex 1 reads outv[3..5] of the same shader. And
+    # the six-texture arm, whose frames must be pairwise different and whose seventh must warn and fall back.
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix='nntc_d12_')
+    try:
+        crops = crop_inputs(tmp, 2, 32)
+        modir, mprefix = out_asset('tiny_d3d12_mat', 'c0')
+        proc = run([encode] + crops + ['-o', modir, '--png', '0', '--quiet'])
+        if proc.returncode != 0:
+            raise SystemExit('FAIL: the two-texture encode for the Direct3D 12 viewer case returned %d' % proc.returncode)
+        mdesc = mprefix + '_nntc.json'
+        lines.append(pair(mdesc, 'mat_t0', ['--tex', '0']))
+        lines.append(pair(mdesc, 'mat_t1', ['--tex', '1']))
+
+        six = crop_inputs(tmp, 6, 32)
+        sixdir, sixprefix = out_asset('tiny_d3d12_six', 'c0')
+        proc = run([encode] + six + ['-o', sixdir, '--png', '0', '--quiet'])
+        if proc.returncode != 0:
+            raise SystemExit('FAIL: the six-texture encode for the Direct3D 12 viewer case returned %d' % proc.returncode)
+        sdesc = sixprefix + '_nntc.json'
+        frames = {}
+        for t in range(6):
+            got, err = d12_shot(sdesc, os.path.join(OUT, 'd12_six%d.bmp' % t), ['--tex', str(t)])
+            if 'WARNING: --tex' in err:
+                raise SystemExit('FAIL: --tex %d is inside a six-texture material and must not warn: %r' % (t, err.strip()))
+            frames[t] = got
+        for a in range(6):
+            for b in range(a + 1, 6):
+                if frames[a] == frames[b]:
+                    raise SystemExit('FAIL: the Direct3D 12 viewer drew the same frame for --tex %d and --tex %d, so its '
+                                     'shader is not selecting the output triple' % (a, b))
+        past, past_err = d12_shot(sdesc, os.path.join(OUT, 'd12_six6.bmp'), ['--tex', '6'])
+        if 'WARNING: --tex 6 is outside 0..5' not in past_err:
+            raise SystemExit('FAIL: --tex 6 on a six-texture material must warn on the Direct3D 12 viewer\'s stderr, '
+                             'not %r' % past_err.strip())
+        if past != frames[0]:
+            raise SystemExit('FAIL: a --tex past the end must fall back to texture 0 on the Direct3D 12 viewer too')
+        print('  the Direct3D 12 viewer: the six --tex frames are pairwise different and --tex 6 warns and falls back '
+              'to 0 (%d bytes each)' % len(frames[0]))
+        lines.append(pair(sdesc, 'six_t5', ['--noaniso', '--tex', '5']))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # A two-file level 0: a BC5 of channels 0-1 and a BC4 of channel 2 alone, which is the path where the shader reads a
+    # third texture and sel.z says so. A viewer that ignored the second file - or bound a stale descriptor for it - would
+    # draw a recognisable, wrong picture, so the comparison against the Direct3D 11 frame is what asserts it.
+    codir, cprefix = out_asset('tiny_d3d12_c0_3')
+    proc = run([encode, os.path.join('tests', 'tiny.png'), '-o', codir, '--l0', 'bc8', '--c0', '3', '--png', '0',
+                '--quiet'])
+    if proc.returncode != 0:
+        raise SystemExit('FAIL: the --c0 3 encode for the Direct3D 12 viewer case returned %d' % proc.returncode)
+    lines.append(pair(cprefix + '_nntc.json', 'c0_3', ['--tex', '0']))
+
+    # THE MINIFIED CAMERA, where the sampler states are live. --noaniso because anisotropic tap placement is free to
+    # differ between two implementations; the second pair drops level 1's LOD SHIFT as well, which is the state the
+    # format's section 5 is about - if the shift reached one viewer's shader and not the other's, THIS is the comparison
+    # that says so.
+    lines.append(pair(desc, 'far_noaniso', ['--tex', '0', '--z', '-50', '--noaniso']))
+    lines.append(pair(desc, 'far_nobias', ['--tex', '0', '--z', '-50', '--noaniso', '--nobias']))
+    # And the two Direct3D 12 frames must differ FROM EACH OTHER. Two pairs that both passed would prove nothing if
+    # --nobias had quietly done nothing at this camera: the pair would then be comparing one state twice.
+    biased = open(os.path.join(ROOT, OUT, 'd12_far_noaniso_d3d12.bmp'), 'rb').read()
+    unbiased = open(os.path.join(ROOT, OUT, 'd12_far_nobias_d3d12.bmp'), 'rb').read()
+    if biased == unbiased:
+        raise SystemExit('FAIL: at --z -50 --noaniso the Direct3D 12 frames with and without level 1\'s LOD shift are '
+                         'the same bytes, so the two pairs above compare one state twice')
+    print('  the Direct3D 12 viewer: at --z -50 --noaniso the frames with and without --nobias differ from each other')
+
+    # The three filter toggles, at a distance where each one has something to do. Each must CHANGE the frame: a flag that
+    # is parsed and then reaches no sampler is worse than one that is refused.
+    far = ['--z', '-50']
+    base_bytes, _ = d12_shot(desc, os.path.join(OUT, 'd12_far_base.bmp'), far)
+    for flag in ('--nomips', '--nobias', '--noaniso'):
+        changed, _ = d12_shot(desc, os.path.join(OUT, 'd12_far%s.bmp' % flag.replace('-', '_')), far + [flag])
+        if changed == base_bytes:
+            raise SystemExit('FAIL: %s did not change the Direct3D 12 viewer\'s frame, so it reaches no sampler and no '
+                             'shader constant' % flag)
+    print('  the Direct3D 12 viewer: --nomips, --nobias and --noaniso each change the frame at --z -50')
+
+    # The display flags, each of which must reach a shader constant, and each compared against the Direct3D 11 viewer as
+    # well: "it changed the frame" says only that the flag reached something, and a --raw0 that showed level 1 or a
+    # --renorm that renormalised the wrong triple would change the frame and be wrong.
+    base3, _ = d12_shot(desc, os.path.join(OUT, 'd12_flags_base.bmp'), [])
+    for flag in ('--raw0', '--raw1', '--renorm'):
+        changed, _ = d12_shot(desc, os.path.join(OUT, 'd12_flags%s.bmp' % flag.replace('-', '_')), [flag])
+        if changed == base3:
+            raise SystemExit('FAIL: %s did not change the Direct3D 12 viewer\'s frame, so it reaches no shader constant'
+                             % flag)
+    print('  the Direct3D 12 viewer: --raw0, --raw1 and --renorm each change the frame')
+    for flag in ('--raw0', '--raw1', '--renorm', '--cube'):
+        lines.append(pair(desc, 'flag' + flag.replace('-', '_'), ['--noaniso', flag]))
+
+    # Key 4 and its flag, both ways round. On the encoder's default level 0 the file already holds optimised BC blocks,
+    # there is nothing for the viewer to pack and --bc must do NOTHING; on an uncompressed level 0 the pack is made at
+    # load and --bc binds it, which is a different picture. Both halves matter.
+    bc_file, _ = d12_shot(desc, os.path.join(OUT, 'd12_bc_file.bmp'), ['--bc'])
+    if bc_file != base3:
+        raise SystemExit('FAIL: --bc changed the frame of an asset whose level 0 is already block-compressed, where the '
+                         'Direct3D 12 viewer has no pack of its own to bind')
+    updir, uprefix = out_asset('tiny_d3d12_unc')
+    proc = run([encode, os.path.join('tests', 'tiny.png'), '-o', updir, '--l0', 'palette', '--bc0', '0', '--png', '0',
+                '--quiet'])
+    if proc.returncode != 0:
+        raise SystemExit('FAIL: the uncompressed-level-0 encode for the Direct3D 12 viewer case returned %d'
+                         % proc.returncode)
+    udesc = uprefix + '_nntc.json'
+    plain, _ = d12_shot(udesc, os.path.join(OUT, 'd12_unc_plain.bmp'), [])
+    packed, packed_err = d12_shot(udesc, os.path.join(OUT, 'd12_unc_bc.bmp'), ['--bc'])
+    if plain == packed:
+        raise SystemExit('FAIL: --bc did not change the frame of an uncompressed level 0, so the load-time pack is not '
+                         'bound')
+    print('  the Direct3D 12 viewer: --bc binds the load-time pack of an uncompressed level 0 and does nothing on a BC one')
+    # And the pack itself, across the two viewers: both make it at load from the same shared/bc_pack.h over the same
+    # uncompressed plane, so the BLOCKS are the same bytes and the only thing left to differ is the sampler. That is
+    # asserted at max 0 - not a tolerance - and a difference of any size would mean one of them packed something else.
+    lines.append(pair(udesc, 'bc_pack', ['--noaniso', '--bc'], max_diff=0))
+
+    # The overlay. --nooverlay is what every comparison above relies on, so the gate has to know the strip was there to
+    # leave off: the same frame with and without it must differ.
+    with_strip = os.path.join(OUT, 'd12_overlay_on.bmp')
+    made = run([view, desc, '--shot', with_strip, '--size', '640', '480'] + D12_PLAIN)
+    if made.returncode != 0:
+        raise SystemExit('FAIL: nntc_view_d3d12 --shot with the overlay returned %d: %r' % (made.returncode,
+                                                                                            made.stderr[-300:]))
+    without = run([view, desc, '--nooverlay', '--shot', os.path.join(OUT, 'd12_overlay_off.bmp'), '--size', '640', '480'] + D12_PLAIN)
+    if without.returncode != 0:
+        raise SystemExit('FAIL: nntc_view_d3d12 --nooverlay --shot returned %d' % without.returncode)
+    if open(os.path.join(ROOT, OUT, 'd12_overlay_off.bmp'), 'rb').read() == open(os.path.join(ROOT, with_strip), 'rb').read():
+        raise SystemExit('FAIL: --nooverlay drew the same frame as a shot with the overlay, so the debug strip is not '
+                         'being drawn at all')
+    print('  the Direct3D 12 viewer: the overlay is drawn, and --nooverlay leaves it off')
+
+    # THIS VIEWER'S OWN STRIP, asserted against this viewer's own frames and nothing else. The strip used to be checked
+    # only by holding it against the Direct3D 11 viewer's, which coupled the two viewers' user interfaces: a line added
+    # to one of them broke an arm belonging to the other, and it said so in the other's words. The cross-viewer
+    # comparison is still made - it is worth having and it is further down - but it is now limited by name to the four
+    # lines the viewers genuinely SHARE, and everything about this viewer's strip is asserted here first.
+    #
+    # This viewer draws five lines: the four the other two draw, and a fifth that says which decoder drew the frame.
+    # What is asserted, all of it from this viewer's frames:
+    #
+    #   the HEIGHT, from both sides. The strip's own rows differ from the same frame drawn with --nooverlay, and the
+    #   rows below it are the same bytes as that frame. A strip one line shorter would leave the decode line's rows
+    #   equal to the scene, a strip one line taller would change a row below it, and both are caught here;
+    #
+    #   the FIVE LINES, each one drawn: a band of rows with white glyph pixels in it, starting in the first glyph cell
+    #   of the left margin. Four lines of text where there should be five is a line that stopped being drawn;
+    #
+    #   the DECODE LINE, on screen at 1280x720, 1920x1080 and 2560x1440 and saying the right one of its four things.
+    #   The strip is 2560 pixels wide and drawn one pixel to one pixel from the left edge of the frame, so what a
+    #   narrow window shows of it is its left-hand end - and the decode path used to be written at the RIGHT-hand end,
+    #   where on any monitor here it was off the side of the frame and was never once seen. That is the bug this arm
+    #   exists for, so it is asserted at the narrow sizes and not only at the widest one.
+    ov_12 = os.path.join(OUT, 'd12_overlay_d3d12.bmp')
+    no_12 = os.path.join(OUT, 'd12_overlay_d3d12_off.bmp')
+
+    def strip_shot(out, size):
+        made = run([view, desc, '--noaniso', '--shot', out, '--size', str(size[0]), str(size[1])] + D12_PLAIN)
+        if made.returncode != 0:
+            raise SystemExit('FAIL: an overlay-case --shot returned %d: %r' % (made.returncode, made.stderr[-300:]))
+        return out
+
+    def decode_line(path, columns=None):
+        """This viewer's decode line in one frame, as the number of characters drawn and their leftmost pixel.
+
+        The line starts at x = 4 and every glyph sits in its own 16-pixel cell, so the rightmost white pixel names the
+        last cell the line reached and therefore how many characters of it are on the frame. `columns` restricts that
+        to what a window of a given width shows.
+        """
+        count, left, right = bmp_ink(path, D12_DECODE_LINE_TOP, D12_STRIP_ROWS_ALL, columns)
+        if not count:
+            raise SystemExit('FAIL: the Direct3D 12 strip\'s decode line - the line that says which decoder drew the '
+                             'frame - has no text at all in %s%s' % (path, '' if columns is None else
+                                                                     ', inside its first %d columns' % columns))
+        return (right - D12_LINE_X) // D12_GLYPH_W + 1, left
+
+    def decode_line_says(path, key, columns=None):
+        """The decode line of `path` measured against the wording D12_DECODE_LINE[key] says it should be."""
+        chars, left = decode_line(path, None)   # UNRESTRICTED: see the clipping note below
+        if columns is not None:
+            # What the window shows of it. A line that fits ends before the last column; a line that is too long is
+            # drawn right up to it, because the strip continues past the frame. Measuring inside `columns` and then
+            # asking how long the line is cannot tell those apart - the measurement itself would stop at the edge -
+            # so the length is measured over the whole strip and the CLIPPING is asked about separately.
+            _, _, right = bmp_ink(path, D12_DECODE_LINE_TOP, D12_DECODE_LINE_TOP + D12_GLYPH_W, columns)
+            if right >= columns - 1:
+                raise SystemExit('FAIL: the Direct3D 12 strip\'s decode line reaches column %d of the %d a %d-wide '
+                                 'window shows in %s, so it is being cut off at the edge of the frame - which is the '
+                                 'bug this line exists to have fixed' % (right, columns, columns, path))
+        if left >= D12_LINE_X + D12_GLYPH_W:
+            raise SystemExit('FAIL: the Direct3D 12 strip\'s decode line starts at column %d in %s, not in the first '
+                             'glyph cell of the left margin; it is the line a reader on a narrow monitor has to see, '
+                             'so it is anchored left like the four above it' % (left, path))
+        if chars > D12_LINE_CHARS:
+            raise SystemExit('FAIL: the Direct3D 12 strip\'s decode line is %d characters in %s and a 1280-wide window '
+                             'shows %d of a line, so it does not fit the narrowest monitor this gate checks'
+                             % (chars, path, D12_LINE_CHARS))
+        want = D12_DECODE_LINE[key]
+        if key == 'no_device':
+            # This one ends in the device's own refusal, whose length is not this file's to know, so what is asserted
+            # is that there IS a reason after the words that introduce it.
+            if chars <= len(want):
+                raise SystemExit('FAIL: the Direct3D 12 strip\'s decode line is %d characters in %s and %r alone is '
+                                 '%d, so it is not carrying the reason the linear-algebra path is unavailable'
+                                 % (chars, path, want, len(want)))
+        elif chars != len(want):
+            raise SystemExit('FAIL: the Direct3D 12 strip\'s decode line is %d characters in %s and the state this run '
+                             'is in should have drawn %r, which is %d; the viewer is in another of its four states, or '
+                             'the wording changed and this file was not told' % (chars, path, want, len(want)))
+        return chars
+
+    strip_shot(ov_12, (2560, 1440))
+    made = run([view, desc, '--nooverlay', '--noaniso', '--shot', no_12, '--size', '2560', '1440'] + D12_PLAIN)
+    if made.returncode != 0:
+        raise SystemExit('FAIL: an overlay-case --nooverlay --shot returned %d: %r' % (made.returncode,
+                                                                                       made.stderr[-300:]))
+    d12_h = frame_size(ov_12)[1]
+    # The height, from both sides.
+    if bmp_rows(ov_12, D12_DECODE_LINE_TOP, D12_STRIP_ROWS_ALL) == bmp_rows(no_12, D12_DECODE_LINE_TOP,
+                                                                           D12_STRIP_ROWS_ALL):
+        raise SystemExit('FAIL: rows %d..%d of the Direct3D 12 frame are the same as its own --nooverlay frame, so the '
+                         'strip is not %d rows tall and its decode line is not being drawn'
+                         % (D12_DECODE_LINE_TOP, D12_STRIP_ROWS_ALL - 1, D12_STRIP_ROWS_ALL))
+    if bmp_rows(ov_12, D12_STRIP_ROWS_ALL, d12_h) != bmp_rows(no_12, D12_STRIP_ROWS_ALL, d12_h):
+        raise SystemExit('FAIL: below its %d overlay rows the Direct3D 12 frame differs from its own --nooverlay '
+                         'frame, so the strip is taller than %d rows or is changing the scene under it'
+                         % (D12_STRIP_ROWS_ALL, D12_STRIP_ROWS_ALL))
+    # The five lines, each one drawn and each one anchored left.
+    for li in range(5):
+        top = 2 + li * D12_LINE_ADV
+        count, left, _ = bmp_ink(ov_12, top, top + 8 * 2)
+        if not count or left >= D12_LINE_X + D12_GLYPH_W:
+            raise SystemExit('FAIL: line %d of the Direct3D 12 strip (rows %d..%d) has no text starting at its left '
+                             'margin, so the strip is not drawing all five of its lines'
+                             % (li + 1, top, top + 8 * 2 - 1))
+    # The decode line, at the three sizes and in the state this run is actually in. A build with no linear-algebra
+    # path says so; a build with one says whether it took it, and D12_PLAIN means these frames did not.
+    decode_state = 'no_build' if not la_built else ('offered' if la_here else 'no_device')
+    seen = 0
+    for size in ((1280, 720), (1920, 1080), (2560, 1440)):
+        one = strip_shot(os.path.join(OUT, 'd12_decode_line_%d.bmp' % size[0]), size)
+        seen = decode_line_says(one, decode_state, columns=size[0])
+    print('  the Direct3D 12 viewer: the strip is %d rows over its own --nooverlay frame and nothing below them, its '
+          'five lines are each drawn at the left margin, and its decode line reads %d characters (%r) and is wholly on '
+          'screen at 1280x720, 1920x1080 and 2560x1440'
+          % (D12_STRIP_ROWS_ALL, seen, D12_DECODE_LINE[decode_state]))
+
+    # AND THE FOUR LINES THE VIEWERS SHARE, which is the one cross-viewer comparison of strips left and is deliberately
+    # limited to exactly those four. The Direct3D 11 viewer rasterises them with the same font, the same scale, the
+    # same layout and the same words, so their rows are asserted byte-identical over the WHOLE width - at that viewer's
+    # own frame size, since the strip is a fixed number of pixels and a frame of another shape puts different pixels
+    # under it. It runs to D12_DECODE_LINE_TOP and not to D12_STRIP_ROWS, so a line either viewer adds BELOW those four
+    # cannot break it; and it lives in this case, so a Direct3D 12 change that does break it fails a Direct3D 12 arm.
+    #
+    # The arithmetic behind the 84: a line advances 20 rows and a glyph is 16 tall, so the fourth line's glyphs end at
+    # row 78, and the fifth is drawn four rows into its own line rather than the usual two so that its glyphs begin at
+    # 84 and not 82 - which keeps the whole band the viewers share out of this viewer's own line. The old comparison
+    # had these 84 rows but only the columns left of 2368, because a decode-path token sat past them; the token is a
+    # line of its own now, and the same 84 rows are compared over all 2560 columns.
+    ov_11 = os.path.join(OUT, 'd12_overlay_d3d11.bmp')
+    no_11 = os.path.join(OUT, 'd12_overlay_d3d11_off.bmp')
+    made = run([d3d, desc, '--shot', ov_11, '--noaniso'])
+    if made.returncode != 0:
+        raise SystemExit('FAIL: nntc_view --shot with the overlay returned %d' % made.returncode)
+    w, h = frame_size(ov_11)
+    made = run([d3d, desc, '--nooverlay', '--noaniso', '--shot', no_11])
+    if made.returncode != 0:
+        raise SystemExit('FAIL: nntc_view --nooverlay --shot returned %d' % made.returncode)
+    shared_12 = strip_shot(os.path.join(OUT, 'd12_overlay_shared.bmp'), (w, h))
+    if frame_size(shared_12) != (w, h):
+        raise SystemExit('FAIL: the two overlay frames are not the same shape, so their rows cannot be compared')
+    if bmp_rows(ov_11, 0, D12_DECODE_LINE_TOP) != bmp_rows(shared_12, 0, D12_DECODE_LINE_TOP):
+        raise SystemExit('FAIL: the first %d overlay rows - the four status lines the Direct3D viewers share - are not '
+                         'byte-identical between them over the whole width, so the shared part of the debug strip is '
+                         'not the same strip' % D12_DECODE_LINE_TOP)
+    # And the Direct3D 11 viewer's own frame, under its own 84-row strip, against its own --nooverlay frame. It is that
+    # viewer's arm and is asserted on that viewer's frames alone.
+    if bmp_rows(ov_11, D12_STRIP_ROWS, h) != bmp_rows(no_11, D12_STRIP_ROWS, h):
+        raise SystemExit('FAIL: below its %d overlay rows the Direct3D 11 frame differs from its own --nooverlay '
+                         'frame, so its strip is changing the scene under it' % D12_STRIP_ROWS)
+    print('  the Direct3D 12 viewer: the %d rows of the four status lines the two Direct3D viewers share are '
+          'byte-identical between them over the whole width' % D12_DECODE_LINE_TOP)
+
+    # THE LINEAR-ALGEBRA DECODE PATH (docs/D3D12_LINEAR_ALGEBRA_PLAN.md part II), and the whole of what a gate can assert
+    # about it. It is optional twice over - a CMake option that is off by default, and a device query that most devices
+    # fail - so every line below is SKIPPED with the build's or the device's own reason rather than failed.
+    #
+    # The arms are the Vulkan stage-4 ones, transliterated:
+    #
+    #   the PICTURE, which is the point and the only acceptance bar this path has: the same asset drawn by the two
+    #   pipelines must be the same picture. The threshold is 4 of 255 and 50 dB, and it is not a tolerance chosen to
+    #   pass - it is what 11 bits of mantissa in the weights and in phi can do to an 8-bit output. An fp16 conversion
+    #   error, a layout mismatch, a wrong M or K or a padding bug would all be far larger;
+    #
+    #   the TWO LAYOUTS: row-major as the host writes it and the device's own multiply-optimal one through
+    #   ConvertLinearAlgebraMatrix are two different buffers read by two different loads, and they must draw one picture;
+    #
+    #   the REFUSAL: --linalg 1 where the query did not pass exits 1 with an ERROR line, because a run that quietly fell
+    #   back would be a measurement of the other path under this one's name;
+    #
+    #   the MEASUREMENT: --bench runs on both paths and prints a number for each. The numbers are informational and
+    #   nothing about them is asserted - only that both paths can be timed at all;
+    #
+    #   the OVERLAY: the strip's decode line across the states only a build with two paths has - the linear-algebra
+    #   one, the plain one on a machine that offers the other, and the plain one on a machine that does not - measured
+    #   and compared at 1280x720, 1920x1080 and 2560x1440. The narrow frames are the ones that matter: this line used
+    #   to be a token at the right-hand end of a 2560-pixel strip that is drawn one pixel to one pixel from the left
+    #   edge of the frame, so on any smaller window it was off the side and no one ever saw it, and a gate that only
+    #   ever looked at the widest frame is what let that pass for four commits.
+    la_asset = os.path.join('examples', 'm1_m4_c0_3_c1_4_nntc.json')
+    la_note = ''
+    if not la_built:
+        la_note = '; the linear-algebra arms skipped (this build has them compiled out)'
+        print('  the Direct3D 12 viewer: the linear-algebra arms are skipped, this build was made without '
+              'NNTC_D3D12_LINALG')
+    elif not la_here:
+        la_note = '; the linear-algebra arms skipped (%s)' % la_reason
+        print('  the Direct3D 12 viewer: the linear-algebra arms are skipped, %s' % la_reason)
+    elif not os.path.isfile(os.path.join(ROOT, la_asset)):
+        la_note = '; the linear-algebra arms skipped (%s is not in this tree)' % la_asset
+        print('  the Direct3D 12 viewer: the linear-algebra arms are skipped, %s is not in this tree' % la_asset)
+    else:
+        la_frames = {}
+        for flag in ('1', '0'):
+            out = os.path.join(OUT, 'd12_linalg_%s.bmp' % flag)
+            made = run([view, la_asset, '--nooverlay', '--noaniso', '--shot', out, '--size', '640', '480',
+                        '--linalg', flag])
+            if made.returncode != 0:
+                raise SystemExit('FAIL: nntc_view_d3d12 --linalg %s --shot returned %d: %r'
+                                 % (flag, made.returncode, made.stderr[-300:]))
+            la_frames[flag] = (out, made.stdout)
+        # The two runs must have taken DIFFERENT paths, and the viewer says which at start-up. Without this the
+        # comparison below could be one path against itself and would pass for the wrong reason.
+        if 'decode: linear algebra' not in la_frames['1'][1] or 'decode: plain' not in la_frames['0'][1]:
+            raise SystemExit('FAIL: --linalg 1 and --linalg 0 did not report the two decode paths: %r / %r'
+                             % (la_frames['1'][1][-200:], la_frames['0'][1][-200:]))
+        print('  the Direct3D 12 viewer, the two decode paths on %s: %s'
+              % (os.path.basename(la_asset),
+                 frame_diff(la_frames['1'][0], la_frames['0'][0], 4, 50.0, 'linear algebra vs plain')))
+
+        # The two matrix layouts. Row-major needs no conversion API at all; the multiply-optimal one is the device's own
+        # and can only come out of ConvertLinearAlgebraMatrix. Whether this device HAS the conversion is its business -
+        # the viewer says so and falls back to row-major - so what is asserted is that whichever two runs happened drew
+        # the same picture, at the same bar as the pair above.
+        layouts = {}
+        for name in ('row', 'optimal'):
+            out = os.path.join(OUT, 'd12_linalg_%s.bmp' % name)
+            made = run([view, la_asset, '--nooverlay', '--noaniso', '--shot', out, '--size', '640', '480',
+                        '--linalg', '1', '--linalg-layout', name])
+            if made.returncode != 0:
+                raise SystemExit('FAIL: nntc_view_d3d12 --linalg-layout %s returned %d: %r'
+                                 % (name, made.returncode, made.stderr[-300:]))
+            layouts[name] = out
+        print('  the Direct3D 12 viewer, the two matrix layouts: %s'
+              % frame_diff(layouts['row'], layouts['optimal'], 4, 50.0, 'row-major vs multiply-optimal'))
+
+        # The refusal, on a device the query does not pass. On this machine that is the integrated part; where every
+        # usable device passes it there is nothing to refuse and the arm says so.
+        refused = False
+        for index in sorted(devices, key=int):
+            bad_la = run([view, la_asset, '--nooverlay', '--shot', os.path.join(OUT, 'd12_linalg_refuse.bmp'),
+                          '--size', '64', '64', '--device', index, '--linalg', '1'])
+            if bad_la.returncode == 0:
+                continue        # that device has the feature too, so there is nothing to refuse there
+            if bad_la.returncode != 1 or 'ERROR: --linalg 1' not in bad_la.stderr:
+                first = next((l for l in bad_la.stderr.splitlines() if l.startswith('ERROR')), '').strip()
+                print('  the Direct3D 12 viewer: device %s is passed over for the --linalg 1 refusal, it exits %d for '
+                      'another reason (%s)' % (index, bad_la.returncode, first or 'no ERROR line'))
+                continue
+            refused = True
+            print('  the Direct3D 12 viewer: --linalg 1 on device %s (%s) is refused with an ERROR and exit 1'
+                  % (index, devices[index]))
+            break
+        if not refused:
+            print('  the Direct3D 12 viewer: the --linalg 1 refusal is skipped, every usable device here has the feature')
+
+        # --bench on both paths. What is asserted is that each run exits 0 and prints its two microsecond figures; the
+        # figures themselves are informational and belong in viewer_d3d12/README.md, quoted as measured.
+        for flag in ('1', '0'):
+            timed = run([view, la_asset, '--nooverlay', '--bench', '20', '--size', '640', '480', '--linalg', flag])
+            if timed.returncode != 0:
+                raise SystemExit('FAIL: --bench 20 --linalg %s returned %d: %r'
+                                 % (flag, timed.returncode, timed.stderr[-300:]))
+            if not re.search(r'^bench: 20 frames at 640x480, decode .*: mean [0-9.]+ us, min [0-9.]+ us',
+                             timed.stdout, re.MULTILINE):
+                raise SystemExit('FAIL: --bench 20 --linalg %s printed no mean and minimum: %r'
+                                 % (flag, timed.stdout[-300:]))
+        # And --bench with --shot is two different runs, which the viewer refuses.
+        both = run([view, la_asset, '--bench', '5', '--shot', os.path.join(OUT, 'd12_linalg_never.bmp')])
+        if both.returncode != 1 or 'ERROR: --bench and --shot' not in both.stderr:
+            raise SystemExit('FAIL: --bench with --shot must exit 1 with its own line, not %d %r'
+                             % (both.returncode, both.stderr[-200:]))
+        print('  the Direct3D 12 viewer: --bench 20 times both decode paths, and --bench with --shot is refused')
+
+        # THE DECODE LINE ACROSS THE STATES, which is the part of the strip only a build with two paths can exercise.
+        # Above that line the frames' rows are the same bytes over the whole width - the four status lines are the same
+        # words whichever decoder drew - and the line's own rows are not. Three states are driven and each is measured
+        # as well as compared: --linalg 1 is the linear-algebra path, --linalg 0 the plain one on a machine that offers
+        # the other, and the integrated part is the plain one on a machine that does not, which carries its reason.
+        #
+        # Every size a monitor here is, and the narrow ones are the point: the strip is wider than any of these frames
+        # and is drawn from the left edge, so what a window shows of the line is its beginning. The state has to be
+        # legible there, which is exactly what the old right-hand token was not.
+        la_seen = {}
+        for size in ((1280, 720), (1920, 1080), (2560, 1440)):
+            la_strips = []
+            for flag, state in (('1', 'linalg'), ('0', 'offered')):
+                out = os.path.join(OUT, 'd12_linalg_ovl_%d_%s.bmp' % (size[0], flag))
+                made = run([view, la_asset, '--noaniso', '--shot', out, '--size', str(size[0]), str(size[1]),
+                            '--linalg', flag])
+                if made.returncode != 0:
+                    raise SystemExit('FAIL: the overlay --shot with --linalg %s returned %d' % (flag, made.returncode))
+                la_seen[state] = decode_line_says(out, state, columns=size[0])
+                la_strips.append(out)
+            if bmp_rows(la_strips[0], 0, D12_DECODE_LINE_TOP) != bmp_rows(la_strips[1], 0, D12_DECODE_LINE_TOP):
+                raise SystemExit('FAIL: at %dx%d the two decode paths\' overlay strips differ above the decode line, '
+                                 'so something other than that line changed' % size)
+            if (bmp_rows(la_strips[0], D12_DECODE_LINE_TOP, D12_STRIP_ROWS_ALL)
+                    == bmp_rows(la_strips[1], D12_DECODE_LINE_TOP, D12_STRIP_ROWS_ALL)):
+                raise SystemExit('FAIL: at %dx%d the overlay strip\'s decode line is the same bytes on both decode '
+                                 'paths, so it is not saying which decoder drew the frame - and at this width that is '
+                                 'what a reader on a monitor of this size would see' % size)
+        # The third state, on a device this path is not available on. Where every usable device here has the feature
+        # there is nothing to draw it with, and the arm says so rather than inventing one.
+        la_no_device = None
+        for index in sorted(devices, key=int):
+            probe_dev = run([view, la_asset, '--nooverlay', '--shot', os.path.join(OUT, 'd12_decode_probe.bmp'),
+                             '--size', '64', '64', '--device', index])
+            if probe_dev.returncode != 0 or 'linear algebra: not available' not in probe_dev.stdout:
+                continue
+            out = os.path.join(OUT, 'd12_decode_line_nodevice.bmp')
+            made = run([view, la_asset, '--noaniso', '--shot', out, '--size', '1280', '720', '--device', index])
+            if made.returncode != 0:
+                raise SystemExit('FAIL: the overlay --shot on device %s returned %d' % (index, made.returncode))
+            la_no_device = (index, decode_line_says(out, 'no_device', columns=1280))
+            break
+        if la_no_device:
+            print('  the Direct3D 12 viewer: on device %s the decode line reads %d characters - the plain path and the '
+                  'reason there is no other - and is wholly on screen at 1280x720'
+                  % (la_no_device[0], la_no_device[1]))
+        else:
+            print('  the Direct3D 12 viewer: the decode line\'s unavailable-device state is skipped, every usable '
+                  'device here has the linear-algebra path')
+        print('  the Direct3D 12 viewer: at 1280x720, 1920x1080 and 2560x1440 the overlay strip differs between the '
+              'two decode paths in its decode line alone, and that line reads %d characters on the linear-algebra path '
+              'and %d on the plain one' % (la_seen['linalg'], la_seen['offered']))
+        la_note = ('; the two decode paths and the two matrix layouts are the same picture on %s, --linalg 1 is refused '
+                   'where the device cannot, and at 1280x720, 1920x1080 and 2560x1440 the strip differs in its decode '
+                   'line alone, that line measuring %d characters on the linear-algebra path, %d on the plain one%s'
+                   % (os.path.basename(la_asset), la_seen['linalg'], la_seen['offered'],
+                      ' and %d on a device without the path' % la_no_device[1] if la_no_device else ''))
+
+    # EVERY OTHER ADAPTER of this machine, which is the point of --device: the viewer is a test of the api path and must
+    # run on more than one vendor's driver and on the software one. WARP against the hardware frame is a pair this tree
+    # has not had; it is expected to differ in bilinear weight rounding, as another vendor's part does, so the bar is the
+    # Vulkan case's looser one and the number found is what is recorded.
+    others = []
+    for index in sorted(devices, key=int):
+        if index == chosen.group(1):
+            continue
+        others.append('%s (%s): %s' % (index, devices[index],
+                                       pair(desc, 'tiny_dev%s' % index, ['--tex', '0', '--noaniso'],
+                                            max_diff=16, min_psnr=40.0, device=int(index))))
+        # And five identical launches there too, because every comparison above rests on the frame being a function of
+        # the command line and the asset alone, on whichever device drew it.
+        shot_stable(view, desc, os.path.join(OUT, 'd12_stable_dev%s.bmp' % index),
+                    ['--size', '640', '480', '--device', index] + D12_PLAIN)
+    for line in others:
+        print('  the Direct3D 12 viewer vs the Direct3D 11 one, on device %s' % line)
+    if not others:
+        print('  the Direct3D 12 viewer: no second adapter on this machine, so the cross-device pairs are skipped')
+
+    for line in lines:
+        print('  the Direct3D 12 viewer vs the Direct3D 11 one, %s' % line)
+
+    # Five launches, five identical files, on the default adapter. --shot creates no window and no swap chain at all, so
+    # there is no keystroke to receive and no compositor in the way.
+    shot_stable(view, desc, os.path.join(OUT, 'd12_stable.bmp'), ['--size', '640', '480'] + D12_PLAIN)
+
+    # The refusals, in the words the other two viewers use.
+    if run([view, '--help']).returncode != 0:
+        raise SystemExit('FAIL: nntc_view_d3d12 --help must exit 0')
+    for args, want in ((['--bogus'], 'unknown option'),
+                       ([desc, '--tex', 'nope'], 'ERROR: --tex'),
+                       ([desc, '--z', 'nope'], 'ERROR: --z'),
+                       ([desc, '--size', '8', '8'], 'ERROR: --size'),
+                       ([desc, '--device', 'nope'], 'ERROR: --device'),
+                       ([desc, '--device', '99'], 'ERROR: --device'),
+                       ([desc, '--shot'], 'ERROR: --shot needs'),
+                       ([desc, '--shot', os.path.join(OUT, 'no_such_dir_here', 'x.bmp')], 'is not a directory'),
+                       (['no_such_descriptor.json'], "cannot read"),
+                       (['tests'], 'is not a file')):   # a directory named where a descriptor was meant
+        bad = run([view] + args)
+        if bad.returncode != 1 or want not in bad.stderr:
+            raise SystemExit('FAIL: nntc_view_d3d12 %s must exit 1 with %r, not %d %r'
+                             % (' '.join(args), want, bad.returncode, bad.stderr[-200:]))
+    print('  the Direct3D 12 viewer: --help exits 0 and the ten refusals each exit 1 with their own line')
+
+    # A SHADER THAT DOES NOT COMPILE, at startup. This viewer reads nntc_view.hlsl from beside the executable and from
+    # nowhere else, so the only way to hand it a broken one is to break the copy beside a copy of the executable: the exe
+    # and the shader go into a scratch directory, the shader there is overwritten with something that is not HLSL, and
+    # the run must print SHADER ERROR, exit 1 and write no frame - not a blank picture and an exit code of 0.
+    bad_dir = os.path.join(OUT, 'd12_badshader')
+    os.makedirs(os.path.join(ROOT, bad_dir), exist_ok=True)
+    src_dir = os.path.dirname(os.path.join(ROOT, view))
+    exe_name = os.path.basename(view)
+    for name in (exe_name, 'nntc_view.hlsl'):
+        shutil.copyfile(os.path.join(src_dir, name), os.path.join(ROOT, bad_dir, name))
+    # A build made with NNTC_D3D12_LINALG exports D3D12SDKVersion and D3D12SDKPath, and the Direct3D 12 runtime then
+    # REFUSES TO CREATE ANY DEVICE unless it finds that version under D3D12\\ beside the executable - not a fall back to
+    # the system runtime, no device at all. So a copy of that executable needs the files the build put beside it, and
+    # this arm is about a broken shader rather than about a half-copied program. Each one is copied only if it is there,
+    # which is what makes the same lines serve a build without the option.
+    for name in ('d3d10warp.dll', 'dxcompiler.dll', 'dxil.dll', 'nntc_view_linalg.hlsl'):
+        if os.path.isfile(os.path.join(src_dir, name)):
+            shutil.copyfile(os.path.join(src_dir, name), os.path.join(ROOT, bad_dir, name))
+    for folder in ('D3D12', 'dx'):
+        if os.path.isdir(os.path.join(src_dir, folder)):
+            shutil.copytree(os.path.join(src_dir, folder), os.path.join(ROOT, bad_dir, folder), dirs_exist_ok=True)
+    with open(os.path.join(ROOT, bad_dir, 'nntc_view.hlsl'), 'w') as f:
+        f.write('this is not a shader, and the point is that it is not\n')
+    bad_frame = os.path.join(bad_dir, 'frame.bmp')
+    if os.path.exists(os.path.join(ROOT, bad_frame)):
+        os.remove(os.path.join(ROOT, bad_frame))
+    bad = run([os.path.join(bad_dir, exe_name), desc, '--nooverlay', '--shot', bad_frame, '--size', '64', '64'])
+    if bad.returncode != 1 or 'SHADER ERROR' not in bad.stderr or os.path.exists(os.path.join(ROOT, bad_frame)):
+        raise SystemExit('FAIL: a broken nntc_view.hlsl beside the executable must exit 1 with SHADER ERROR and write '
+                         'no frame, not %d %r' % (bad.returncode, bad.stderr[-300:]))
+    print('  the Direct3D 12 viewer: a broken nntc_view.hlsl beside the executable is SHADER ERROR, exit 1 and no frame')
+
+    # AND THE OTHER HALF OF THAT RULE: the good copy beside the executable is read even when the WORKING DIRECTORY has a
+    # decoy of the same name. The case above proves a broken shader is not ignored; this one proves which of two
+    # candidate files gets compiled, which is the part a change to exe_dir could silently break. Every path is absolute,
+    # because the working directory is no longer the tree.
+    cwd_dir = os.path.join(ROOT, OUT, 'd12_cwd_decoy')
+    os.makedirs(cwd_dir, exist_ok=True)
+    with open(os.path.join(cwd_dir, 'nntc_view.hlsl'), 'w') as f:
+        f.write('this file is in the working directory and must never be the one that is compiled\n')
+    cwd_frame = os.path.join(cwd_dir, 'frame.bmp')
+    if os.path.exists(cwd_frame):
+        os.remove(cwd_frame)
+    from_cwd = subprocess.run([os.path.abspath(os.path.join(ROOT, view)), os.path.abspath(os.path.join(ROOT, desc)),
+                               '--nooverlay', '--shot', cwd_frame, '--size', '64', '64'],
+                              cwd=cwd_dir, capture_output=True, text=True, encoding='utf-8', errors='replace')
+    compiled = re.search(r'^shader compiled: (.*)$', from_cwd.stdout, re.MULTILINE)
+    exe_here = os.path.dirname(os.path.abspath(os.path.join(ROOT, view)))
+    if from_cwd.returncode != 0 or not compiled or not os.path.exists(cwd_frame):
+        raise SystemExit('FAIL: the viewer started from a directory holding a decoy nntc_view.hlsl must still compile '
+                         'the shader beside its executable, not %d %r' % (from_cwd.returncode, from_cwd.stderr[-300:]))
+    if os.path.dirname(os.path.abspath(compiled.group(1).strip())) != exe_here:
+        raise SystemExit('FAIL: the viewer compiled %r, which is not beside its executable (%s)'
+                         % (compiled.group(1), exe_here))
+    print('  the Direct3D 12 viewer: started from a directory with a decoy nntc_view.hlsl, the shader beside the '
+          'executable is still the one compiled')
+
+    seconds = time.perf_counter() - started
+    record('the Direct3D 12 viewer',
+           'the same picture as the Direct3D 11 viewer on a single image, a two-texture material (--tex 0 and 1), a '
+           'six-texture one, a two-file level 0 and the load-time BC pack (at max 0), at the default camera and at '
+           '--z -50 --noaniso with and without level 1\'s LOD shift, where the two frames differ from each other; '
+           '--raw0, --raw1, --renorm and --cube each compared against that viewer too; its own strip %d rows over its '
+           'own --nooverlay frame with nothing below them, its five lines each drawn at the left margin, and its '
+           'decode line reading %r and wholly on screen at 1280x720, 1920x1080 and 2560x1440; the %d rows of the four '
+           'status lines the two Direct3D viewers share byte-identical between them over the WHOLE width'
+           % (D12_STRIP_ROWS_ALL, D12_DECODE_LINE[decode_state], D12_DECODE_LINE_TOP)
+           + ('; and the same asset on %s' % ', '.join(o.split(':')[0].strip() for o in others) if others else '')
+           + '; the six --tex frames pairwise different and --tex 6 warning and falling back, the filter toggles and '
+             '--raw0 / --raw1 / --renorm each changing the frame, --bc binding the load-time pack of an uncompressed '
+             'level 0 and doing nothing on a BC one, --shot with no --size 2560x1440, five launches byte-identical on '
+             'every adapter, --help exiting 0 and ten refusals exiting 1, a broken shader exiting 1, and the shader '
+             'read from beside the executable rather than from the working directory'
+           + la_note
+           + ' (%.0f s)' % seconds)
+    print('  the Direct3D 12 viewer: the Direct3D 12 arms took %.0f s' % seconds)
+
+
 def absolute_path_check(encode, build_dir):
     """A descriptor may name its .dds files by an absolute path (a hand-authored one; the encoder writes base names),
     and every reader takes an absolute path as written and a relative one from the descriptor's directory. The gate
@@ -4723,6 +5544,7 @@ def main():
     old_format_check(encode, build_dir)
     viewer_refusal_checks(encode, build_dir)
     vulkan_viewer_checks(encode, build_dir)
+    d3d12_viewer_checks(encode, build_dir)
     absolute_path_check(encode, build_dir)
     never_delete_check(encode)
     argument_and_status_checks(encode)
