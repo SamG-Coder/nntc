@@ -1,9 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 project(nntc LANGUAGES CXX)
 
-# The encoder is CUDA only: the host does I/O, the layout, the small dense solves and the report, and every per-texel pass
-# is a kernel. It builds on Windows (MSVC + nvcc) and on Linux (gcc / clang + nvcc). The viewer is Direct3D 11 and is
-# therefore built on Windows only.
+# The encoder is always built. The host does I/O, the layout, the small dense solves and the report, and every
+# per-texel pass is a kernel -- of the CUDA backend where a CUDA compiler was found, and of the scalar CPU backend
+# where one was not. Both arms sit behind a dispatcher; the encoder's own section below says why that is so and what
+# it proves. Windows (MSVC, with nvcc when it is there) and Linux (gcc or clang, likewise).
+#
+# Three viewers draw the same asset through three graphics APIs: nntc_view on Direct3D 11 and nntc_view_d3d12 on
+# Direct3D 12, both Windows only, and nntc_view_vk on Vulkan, which builds on Windows and on Linux.
 #
 # Configure with the Visual Studio generator and a CUDA toolset new enough for the target architectures, for example:
 #   cmake -B build -S . -G "Visual Studio 18 2026" -T cuda=13.4
