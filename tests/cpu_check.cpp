@@ -35,22 +35,11 @@
 
 // export.cpp, which the BC refinement packs through, writes its PNGs with stb_image_write; main.cpp compiles that
 // library's implementation for the encoder, and this program has no main.cpp, so it compiles it here in the same way -
-// with its warnings turned down on every compiler, since it is vendored and not edited and this program should add no
-// warning of its own to a build.
-#if defined(_MSC_VER)
-#pragma warning(push, 0)
-#elif defined(__GNUC__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-#endif
+// plainly, with nothing suppressed around it, because the header is clean at this program's warning level on every
+// compiler and a warning a future version brings with it should be seen rather than hidden.
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 #undef STB_IMAGE_WRITE_IMPLEMENTATION
-#if defined(_MSC_VER)
-#pragma warning(pop)
-#elif defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
 
 #include "cpu/cpu_backend.h"
 #include "cpu/cpu_model.h"

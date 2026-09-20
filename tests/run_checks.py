@@ -30,7 +30,9 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# The vendored single-header libraries are carried verbatim and are never edited, so they are not searched.
+# The single-header libraries are not searched. They are carried as they came, except where a compiler warning
+# was fixed at its source - stb_image_write.h says so at its own first line - and this file's patterns are
+# about the tree's own prose and conventions, which those headers were never going to follow.
 VENDORED = {'stb_image.h', 'stb_image_write.h', 'stb_image_resize2.h', 'json.h', 'bcdec.h'}
 
 # The patterns are assembled from pieces so that this file does not match itself.

@@ -7,12 +7,11 @@
 // The driver loads and pads the source, builds the source chain and the two latents' plane layout, selects the CUDA
 // device (there is no CPU encoding path), initialises both latents, fits the decoder and writes the asset.
 
-// The vendored single-header libraries are compiled here, once for the whole program, with the warning level turned
-// down: they are third-party code and are not edited. The implementation macros are undefined again straight away
-// because stb emits its implementation outside its own include guard, so a second include would define it twice.
-#ifdef _MSC_VER
-#pragma warning(push, 0)
-#endif
+// The vendored single-header libraries are compiled here, once for the whole program. They are compiled at the tree's
+// own warning level with nothing suppressed around them: they are clean under it on every compiler, and a warning a
+// future version of one of them brings with it should be seen rather than hidden. The implementation macros are
+// undefined again straight away because stb emits its implementation outside its own include guard, so a second
+// include would define it twice.
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
@@ -23,9 +22,6 @@
 #undef STB_IMAGE_WRITE_IMPLEMENTATION
 #undef STB_IMAGE_RESIZE_IMPLEMENTATION
 #define NNTC_STBIW_DEFINED   // this translation unit holds stb_image_write's definitions; image.h need not declare one
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
 
 #include <algorithm>
 #include <cassert>
