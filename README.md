@@ -474,9 +474,9 @@ and runs the small decoder on the filtered latent values.
 
 This works well enough visually because the parts of the decode that dominate are affine in the sampled latents. The
 dequantisation is affine and happens after `Sample()`, so dequantising a hardware-filtered latent sample is the same as
-filtering the dequantised latent values. The decoder's linear terms commute with the filter for the same reason. The one
-non-affine piece is the product term: filtering first gives `avg(s) * avg(c)`, while filtering a decoded image would
-contain `avg(s * c)`. The difference is the local covariance of the full-resolution selector plane and the
+filtering the dequantised latent values. The decoder's linear terms commute with the filter for the same reason. The only 
+part that does not commute with filtering is the fixed bilinear product term: filtering first gives avg(s) * avg(c), while 
+filtering a reconstructed image would contain avg(s * c). The difference is the local covariance of the full-resolution selector plane and the
 quarter-resolution colour plane inside the filter footprint. On normal material data that covariance is usually small:
 the colour plane is smooth at level 0's scale, the selector plane carries the high-frequency choice/detail, and the
 textures of one surface tend to share the same edges and regions.
