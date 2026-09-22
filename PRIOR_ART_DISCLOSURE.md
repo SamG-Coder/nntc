@@ -46,9 +46,30 @@ network trainer: it is an **alternating sequence of exact block solves** (linear
 9-point stencil, and per-texel or per-block exact searches over the shipped format's own values), running on CUDA in about one second to about a minute depending on the pixel count, the texture count and the layout (or, with no NVIDIA GPU, on a portable CPU backend 8 to 14 times slower, 5.8), 113-167x faster than the evolutionary encoder it replaces, within about 2 dB of it either way and ahead where the layout has room. The BC4 / BC5 blocks the file holds are **chosen by analysis by synthesis against the decoder's output**,
 the way a BC7 or ASTC encoder chooses blocks, not by packing a finished plane.
 
-The one-sentence framing: *a learned GPU block compression format in which compact per-block and per-texel discrete
-data are reconstructed by a small affine decoder acting as the inverse transform, with the hardware texture filter
-inside the fitting objective.*
+The one-sentence framing: *a data-fitted GPU block compression format in which compact per-block and per-texel
+discrete data are reconstructed by a small affine reconstruction transform, with the hardware texture filter inside
+the fitting objective.*
+
+**What the runtime does, in two steps, because the distinction matters.** Given the two filtered samples `s` (level
+0) and `c` (level 1), dequantised by the affine per-channel rule of 2.2:
+
+1. **A fixed, parameter-free feature construction**: `phi = [c; s; s (x) c]`, where `(x)` is the outer product and
+   the flattening order is 2.3's. No fitted quantity appears here. It is a predetermined algebraic basis expansion,
+   the same rule for every material.
+2. **A fitted affine reconstruction**: `out = W phi + b`. One GEMV and a bias.
+
+Every fitted decoder parameter lives in that one affine transform. **There is no fitted non-linear function**: the
+product terms come from step 1, which is fixed, and step 2 is affine. The whole decoder is therefore a polynomial
+of degree 2 in the samples whose only quadratic terms are the fixed cross-products `s_i c_j`, before the [0,1] clamp
+applied on 8-bit write-out.
+
+The distinction is worth stating because it is where a boundary falls. Where a format's reconstruction is carried
+out by a *parameterized* non-linear function, the fitted quantities sit inside that non-linearity. Here they do not.
+The only departure from affine dependence on the original samples is the fixed product basis of step 1; it carries
+no fitted parameters and is identical for every material. Everything fitted is the affine map that follows it.
+Treating a fixed, parameter-free bilinear basis expansion as belonging to the same class as a fitted non-linear
+reconstruction is the broad reading, and that reading sweeps in classical fixed-coefficient interpolation and
+modulation schemes - BC1 and PVRTC among them - which long predate this work and are surveyed in section 9.
 
 ---
 
@@ -95,7 +116,7 @@ No hidden layer, no activation: the output is the affine map itself, clamped to 
 cross terms are the model: `out = (b + B s) + (A + sum_i s_i M_i) c`, so the full-resolution selector plane chooses,
 per texel, which linear combination of the low-resolution colour channels is applied. At the default layout the
 decoder is 45 numbers for one texture. A member of the same family with fixed coefficients is BC1's or PVRTC's
-interpolation; here the coefficients are fitted per material and the low-resolution plane is a learned coordinate
+interpolation; here the coefficients are fitted per material and the low-resolution plane is a fitted coordinate
 field the selector re-reads.
 
 The order of `phi` is a contract published in the JSON (`terms: "a b sc"`) and asserted by every reader.
@@ -157,7 +178,7 @@ why the sign convention of the residual seed (5.5) changes nothing but readabili
 
 `nntc_view` is a Direct3D 11 program, and `nntc_view_vk` its Vulkan transliteration (3.1), that binds the asset's `.dds` files as ordinary shader resources, samples each
 once per pixel in the pixel shader at the same texture coordinate with the same filter, dequantises, forms `phi` and
-applies the one layer. Nothing is decompressed, repacked or repaired at load. Specifics that a consumer must copy:
+applies the weight matrix and bias. Nothing is decompressed, repacked or repaired at load. Specifics that a consumer must copy:
 
 * **Level 1 is sampled with both texture-coordinate gradients multiplied by `2^lod_bias_level1` = 4** (the JSON's
   `lod_bias_level1` = `log2(block)` = 2), through `SampleGrad` / `textureGrad` (`viewer/bin/nntc_view.hlsl:81`,
@@ -224,7 +245,7 @@ on an integrated Radeon the difference is that vendor's bilinear weight rounding
 
 ### 3.2 The decode as one cooperative-vector instruction (`viewer_vk/bin/view_coopvec.frag`)
 
-Because the decoder is one affine layer, everything after the samples and the products is one matrix-vector
+Because the decoder is one affine map, everything after the samples and the products is one matrix-vector
 multiply-add, `out = W phi + b`, which is exactly the operation `VK_NV_cooperative_vector` puts in a shader. The
 shading language requires the matrix shape and its interpretation arguments to be compile-time constants while `nin`
 and `nout` vary per asset, so `W` is zero-padded to the format's maximum, 18 by 24, and `phi` is zero past `nin`: a
@@ -284,9 +305,14 @@ Format decisions worth recording:
 * One `lo/hi` pair per channel covers the whole mip chain, because the GPU applies one scale and bias whatever mip its
   sampler chose; the encoder therefore fits the range over base and chain together.
 * `decoder`: `type: "bilinear"`, `terms: "a b sc"`, `C0`, `C1`, `nin`, `nout`, `output: "identity"`, `hidden: []`,
-  one layer of `nout x nin` row-major weights and a bias. A reader refuses anything else rather than guessing.
+  one `nout x nin` row-major weight matrix and a bias. A reader refuses anything else rather than guessing.
+  **`hidden` and `output` are a contract, not a capability**: `hidden` must be the empty list and `output` must be
+  `identity`, a reader refuses any other value, and no writer in this tree emits one. The two fields are there so
+  that a file claiming a hidden layer or an activation is rejected by name rather than silently half-decoded. The
+  vocabulary is network-shaped; the format it describes is `type: "bilinear"` and contains one affine weight
+  matrix and bias.
 * An independent reader, `tools/dds_decode.py` (about four hundred lines of Python, no shared code), parses the
-  headers, decodes the BC blocks, dequantises, applies the layer and reproduces the encoder's PSNR at every level; the
+  headers, decodes the BC blocks, dequantises, applies the weight matrix and bias and reproduces the encoder's PSNR at every level; the
   release gate runs it on every asset written.
 
 ---
@@ -734,10 +760,10 @@ asset on the hardware sampler.
 * **The author's "Experiments in Luma-Optimized and Mipmapped DXT1 Compression"
   (https://web.archive.org/web/20201024153426/https://sites.google.com/site/richgel99/luma_chroma_texture_compression)**
   split a texture into a full-resolution luma plane and a lower-resolution chroma plane in a block format with mipmaps;
-  the two-resolution layout here is that split with both planes learned and the decoder fitted per material.
+  the two-resolution layout here is that split with both planes and the decoder fitted per material.
 * **BC1 / PVRTC / ASTC** are fixed-coefficient members of the "small discrete data reconstructed by an affine map"
-  family; here the coefficients are fitted per material, the low-resolution plane is learned, and one decoder yields a
-  whole material.
+  family; here the coefficients are fitted per material, the low-resolution plane is a fitted coordinate field
+  rather than colours, and one decoder yields a whole material.
 * **Analysis by synthesis is how BC7 / ASTC encoders choose blocks**; the new element is that the synthesis is the
   decoder's output under the sampling operator, not the block's own texels, and that the outer loop refits the
   rest of the model against the packed blocks and keeps a pass only if the shipped objective falls.
@@ -759,9 +785,10 @@ asset on the hardware sampler.
   (The Visual Computer 28, 2012)** describe, in their abstract, a system based on linear transforms that merges the
   decompression and filtering phases, formalised for any linear transform, adapted to the DCT and implemented in
   shaders. NNTC shares the principle that a linear stage lets filtering move ahead of decoding, but its stored
-  quantities are fitted latents rather than transform coefficients, the filter is the texture unit's own bilinear,
-  trilinear or anisotropic rule applied to ordinary textures, and its decoder is not linear in the two samples: the product terms are
-  exactly where filtering before decoding stops being exact (2.4), which NNTC handles by fitting under the filter.
+  quantities are fitted latents rather than transform coefficients, and the filter is the texture unit's own
+  bilinear, trilinear or anisotropic rule applied to ordinary textures. NNTC forms fixed pairwise cross-products of
+  the two filtered samples before its fitted affine decoder; those product terms are the only reason filtering and
+  reconstruction do not commute exactly (2.4), which NNTC handles by fitting under the filter.
 * **Mavridis and Papaioannou, "Texture compression using wavelet decomposition" (Computer Graphics Forum 31(7),
   Pacific Graphics 2012)** store the coefficients of a modified Haar transform in standard DXT5 / BC7 blocks, with
   chroma subsampled in YCoCg-R, and invert the transform in a shader. Because each stored texel carries a 2x2 group of
@@ -776,7 +803,7 @@ asset on the hardware sampler.
   follows the decode (the paper implements software bilinear and trilinear filtering by decoding four or eight texels, and proposes
   stochastic filtering), the network being fitted only at discrete texel positions and mip levels. NNTC shares the per-material,
   multi-texture decoder and the joint fit of the mip chain, and differs in decoding hardware-filtered latents with no
-  position input (2.4; section 10 item 15 says why), in a one-layer affine decoder fitted by exact block solves, and
+  position input (2.4; section 10 item 15 says why), in an affine decoder fitted by exact block solves, and
   in shipping standard BC4 / BC5 and 8-bit textures that the texture unit samples.
 * **Weinreich, de Oliveira, Houdard and Nader, "Real-time neural materials using block-compressed features" (Computer
   Graphics Forum 43, Eurographics 2024)** store a material's learned features as four mipmapped BC6 textures,
@@ -785,7 +812,7 @@ asset on the hardware sampler.
   its resolution, and a small MLP (12 inputs, one hidden layer of 16) decodes the filtered features in the shader,
   trained at random positions and continuous scales against a filtered reference so that nothing is filtered after the
   decode. It is the closest prior art for decoding hardware-filtered, block-compressed latents, including per-texture
-  LOD offsets for latents of different resolutions. NNTC differs in the decoder (one affine layer over two latents and
+  LOD offsets for latents of different resolutions. NNTC differs in the decoder (one affine map over two latents and
   their products, no hidden layer, no activation), in the fit (alternating exact block solves at a fixed,
   deterministic site set, no gradient descent and no random sampling), in the block format (BC4 / BC5 blocks chosen
   after a continuous solve by an explicit endpoint least squares and exact selector argmin against the decoder's
@@ -843,8 +870,8 @@ Named here so their shape is on record. **None of these is implemented** unless 
 8. **Perceptual weighting with no format change**: a per-pixel `cw` from local variance of the source (texture
    masking) multiplied into `E`, so the exact solves reallocate toward low-masking regions with zero bits and no decoder
    change. The objective already carries per-output weights; a per-site weight is the same accumulator.
-9. **A learned or fixed post-filter in the objective**: a small neighbourhood filter on the decoded output, fitted
-   jointly (the predecessor tree measured a learned 5x5 filter as a Pareto win under evolution strategies); here it
+9. **A fitted or fixed post-filter in the objective**: a small neighbourhood filter on the decoded output, fitted
+   jointly (the predecessor tree measured a fitted 5x5 filter as a Pareto win under evolution strategies); here it
    would be a second least-squares block if kept linear.
 10. **More sites, other sites**: `K = 8` or a per-texel phase pattern; mip-level blends (trilinear sites, two levels'
     inputs blended before one decode) and anisotropic tap patterns as sites, so the objective matches the consumer's
