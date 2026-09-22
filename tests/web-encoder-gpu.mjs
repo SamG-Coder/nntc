@@ -21,4 +21,3 @@ try {
     await mkdir('out/web-tests',{recursive:true});
     await writeFile('out/web-tests/gpu.json',JSON.stringify(results,null,2));
 } finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}
-

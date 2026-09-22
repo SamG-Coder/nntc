@@ -88,6 +88,8 @@ site or whole-mip-chain error measurement.
 npm test
 npm run test:gpu
 npm run test:ui
+# Optional independent upstream decoder (requires numpy and Pillow):
+python tests/check-web-exports.py
 ```
 
 The Node tests compile every CUDA entry and check all 32 combinations of latent
@@ -99,6 +101,10 @@ JavaScript decoder reads the generated DDS bytes and descriptor, and checks its
 reconstruction against the GPU. The UI test encodes the bundled single-map and
 four-map materials, downloads ZIPs, loads the interactive viewer, and checks a
 mobile viewport and browser errors.
+
+The Python cross-check also validates ZIP CRCs and runs the original repository's
+strict DDS reader and decoder on both downloaded assets. It reports saturated,
+rounded RGB8 PSNR, which can differ from the browser's unclamped float PSNR.
 
 On Windows the browser tests use installed Edge. Set `NNTC_BROWSER` to another
 Playwright browser channel. On other platforms they use Playwright Chromium;

@@ -145,4 +145,3 @@ __global__ void decode(const float* latent0, const float* latent1, const float* 
         output[id*nout+o] = value;
     }
 }
-

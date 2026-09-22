@@ -38,4 +38,3 @@ try {
  assert.deepEqual(errors,[]);
  await writeFile('out/web-tests/ui.json',JSON.stringify({status,metrics,viewerStatus,fourMapMaterial:material,errors},null,2));
 }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}
-
