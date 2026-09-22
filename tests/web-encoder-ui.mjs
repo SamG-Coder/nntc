@@ -1,0 +1,40 @@
+import {chromium} from 'playwright';
+import {createServer} from '../scripts/serve-web.mjs';
+import {mkdir,writeFile} from 'node:fs/promises';
+import assert from 'node:assert/strict';
+const server=createServer();await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+let browser;
+try {
+ browser=await chromium.launch({...(process.env.NNTC_BROWSER?{channel:process.env.NNTC_BROWSER}:process.platform==='win32'?{channel:'msedge'}:{}),headless:true,args:['--enable-unsafe-webgpu',...(process.env.NNTC_SOFTWARE_GPU==='1'?['--use-angle=swiftshader','--enable-unsafe-swiftshader']:[])]});
+ const page=await browser.newPage({viewport:{width:1440,height:1100}}),errors=[];
+ page.on('pageerror',error=>errors.push(error.message));
+ page.on('console',message=>{if(message.type()==='error')errors.push(message.text());});
+ await page.goto(`http://127.0.0.1:${server.address().port}/`);
+ await page.locator('#example').click();await page.waitForFunction(()=>!document.querySelector('#encode').disabled);
+ await page.locator('#encode').click();
+ await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Encoding complete')||document.body.classList.contains('error'),null,{timeout:300000});
+ const status=await page.locator('#status').textContent();assert.match(status,/Encoding complete/);
+ await mkdir('out/web-tests',{recursive:true});
+ await page.screenshot({path:'out/web-tests/encoder.png',fullPage:true});
+ const downloadPromise=page.waitForEvent('download');await page.locator('#download').click();const download=await downloadPromise;await download.saveAs('out/web-tests/m1.zip');
+ const metrics=await page.locator('#metrics').innerText();console.log(metrics);
+ await page.locator('#view').click();
+ const frame=page.frameLocator('#viewer');await frame.locator('#status-line').filter({hasText:'m1_nntc.json'}).waitFor({timeout:60000});
+ const viewerStatus=await frame.locator('#status-line').innerText();console.log(viewerStatus);
+ assert.match(viewerStatus,/Loaded/);
+ await page.screenshot({path:'out/web-tests/viewer.png',fullPage:true});
+ await page.setViewportSize({width:390,height:844});await page.locator('#close-viewer').click();await page.screenshot({path:'out/web-tests/mobile.png',fullPage:true});
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ await page.setViewportSize({width:1440,height:1100});
+ await page.locator('#images').setInputFiles(['examples/m1.png','examples/m2.png','examples/m3.png','examples/m4.png']);
+ await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('4 maps'));
+ await page.locator('#encode').click();
+ await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Encoding complete')||document.body.classList.contains('error'),null,{timeout:300000});
+ assert.match(await page.locator('#status').innerText(),/Encoding complete/);
+ const material=[];
+ for(let i=0;i<4;i++) {await page.locator('#texture').selectOption(String(i));material.push(await page.locator('#metrics').innerText());}
+ console.log(JSON.stringify({fourMapMaterial:material}));
+ const multiDownloadPromise=page.waitForEvent('download');await page.locator('#download').click();await (await multiDownloadPromise).saveAs('out/web-tests/m1-m4.zip');
+ assert.deepEqual(errors,[]);
+ await writeFile('out/web-tests/ui.json',JSON.stringify({status,metrics,viewerStatus,fourMapMaterial:material,errors},null,2));
+}finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}
