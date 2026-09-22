@@ -12,13 +12,13 @@ four channels, and one matrix multiply of a few dozen to a few hundred multiply-
 material (the count is in [How it works](#how-it-works-briefly), below). No runtime library, no decompression at load, no neural inference: the files are standard mipmapped `.dds`
 (BC4 / BC5 and 8-bit) and a `.json` containing the fitted bilinear model's decoder coefficients.
 
-The WebGPU NNTC viewer is [hosted live on the web here](https://subquantumtech.com/nntc/).
-
 The [VK_NV_cooperative_vector](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_cooperative_vector.html) extension is supported in the Vulkan viewer for potentially faster decoding. The D3D 12 viewer optionally supports the [Linear Algebra Runtime](https://microsoft.github.io/DirectX-Specs/d3d/D3D12LinearAlgebraRuntimeFeatureSupport.html).
 
 The `nntc_view` tool is a Windows D3D11 viewer, which runs on any GPU, that loads the .json and .dds files and displays the sampled and decoded results on a textured quad or a cube, with keyboard camera controls. `nntc_view_vk` is the Vulkan viewer, which also runs on any GPU, with the same window and keys, for Windows and Linux ([`viewer_vk/README.md`](viewer_vk/README.md)); `nntc_view_d3d12` is the Windows Direct3D 12 viewer.
 
 Importantly, this method is compatible with normal GPU texture hardware bilinear, trilinear, and anisotropic filtering. The encoder ensures the encoded latents and the fitted coefficients are compatible with hardware filtering. The bottom line: NNTC enables large runtime and distribution memory savings due to packing 2-6 correlated material textures into a single set of latent textures, which are sampled normally and then decoded by a small pixel shader function.
+
+The WebGPU NNTC viewer is [hosted live on the web here](https://subquantumtech.com/nntc/).
 
 A Prior Art Disclosure, dated September 13, 2026, is [here](PRIOR_ART_DISCLOSURE.md).
 
