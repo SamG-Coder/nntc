@@ -1,0 +1,13 @@
+{
+  "name": "nntc-cuda-webshader",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/serve-web.mjs",
+    "test": "node --test tests/web-encoder.test.mjs",
+    "test:gpu": "node tests/web-encoder-gpu.mjs",
+    "test:ui": "node tests/web-encoder-ui.mjs"
+  },
+  "devDependencies": {"playwright": "1.56.1"},
+  "engines": {"node": ">=20"}
+}

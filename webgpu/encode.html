@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NNTC · Browser encoder</title><link rel="stylesheet" href="encoder/style.css"><link rel="icon" href="data:,"></head>
+<body>
+<header><a class="brand" href="encode.html">NNTC <span>TEXTURE TOOLS</span></a><a href="index.html">Open asset viewer ↗</a></header>
+<main>
+<div class="intro"><div class="eyebrow">CUDA WEBSHADER / WEBGPU</div><h1>One material.<br>Shared texture space.</h1>
+<p>Compress up to six material maps into two latent planes and a small decoder. Encode, inspect, and export directly in your browser.</p></div>
+<div class="workspace">
+<form id="form">
+<fieldset id="settings">
+<div class="section-heading"><span>01</span><h2>Source material</h2></div>
+<label class="dropzone" id="dropzone" for="images"><strong>Choose material images</strong><span>PNG, JPEG, WebP · same dimensions · up to 6 maps</span><input id="images" type="file" accept="image/*" multiple></label>
+<button type="button" id="example" class="text-button">Try the bundled material</button>
+<div id="inputs" class="inputs"></div>
+<p id="input-note" class="note">Images stay on your device. RGB channels are encoded; alpha is ignored.</p>
+<div class="section-heading"><span>02</span><h2>Compression</h2></div>
+<label>Output name<input id="name" value="material" pattern="[A-Za-z0-9_.\-]+" required></label>
+<div class="fields"><label>Detail channels<select id="c0"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
+<label>Color channels<select id="c1"><option>1</option><option>2</option><option>3</option><option selected>4</option></select></label></div>
+<div class="fields"><label>Fitting passes<input id="iterations" type="number" min="0" max="100" value="6" required></label>
+<label>Detail storage<select id="storage"><option value="bc">BC4 / BC5</option><option value="raw">Uncompressed 8-bit</option></select></label></div>
+<label class="check"><input id="mips" type="checkbox" checked> Fit a shared mip chain</label>
+<label class="check"><input id="filtered" type="checkbox" checked> Fit fractional samples for texture filtering</label>
+<p class="note">This browser optimizer uses the NNTC format, with a different fitting strategy from the native encoder. Quality and speed can differ.</p>
+</fieldset>
+<div class="actions"><button id="encode" type="submit" disabled>Encode material <span>→</span></button><button id="cancel" type="button" hidden>Cancel</button></div>
+<div class="status"><span id="indicator"></span><p id="status" role="status" aria-live="polite">Choose images to begin.</p></div>
+</form>
+<section class="inspection">
+<div class="section-heading"><span>03</span><h2>Inspect the result</h2><select id="texture" aria-label="Texture to inspect" hidden></select></div>
+<div id="empty"><div class="grid-art"></div><h3>Your material, reconstructed.</h3><p>Compare the source with the exported representation here.</p></div>
+<div id="result" hidden><div class="comparison"><figure><canvas id="source"></canvas><figcaption>SOURCE</figcaption></figure><figure><canvas id="reconstruction"></canvas><figcaption>RECONSTRUCTED</figcaption></figure></div>
+<div id="metrics" class="metrics"></div><div id="downloads" class="actions"><button id="download" type="button">Download material .zip ↓</button><button id="view" type="button" class="secondary">Open interactive viewer</button></div><p class="note">The archive contains the descriptor and every DDS texture. Extract them together to load in any NNTC viewer.</p></div>
+</section>
+</div>
+<section id="viewer-section" hidden><div class="section-heading"><h2>Interactive asset viewer</h2><button id="close-viewer" class="text-button">Close</button></div><iframe id="viewer" title="NNTC interactive material viewer"></iframe></section>
+<footer>Non-Neural Texture Compression · Based on Richard Geldreich Jr.’s NNTC · <a href="https://github.com/SamG-Coder/nntc">Source</a></footer>
+</main><script type="module" src="encoder/app.js"></script>
+</body></html>

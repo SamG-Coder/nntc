@@ -3,3 +3,4 @@ build_*/
 out/
 out_*/
 __pycache__/
+node_modules/

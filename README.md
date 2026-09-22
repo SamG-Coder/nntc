@@ -3,6 +3,15 @@
 
 # NNTC: Non-Neural Texture Compression
 
+> **CUDA WebShader browser encoder fork.** This fork adds browser encoding and
+> direct handoff to the existing WebGPU viewer. Clone with `--recurse-submodules`,
+> run `npm ci` then `npm start`, and open `http://127.0.0.1:5174`.
+> See [the browser encoder guide](docs/BROWSER_ENCODER.md) for supported features,
+> tests and differences from the native encoder. The browser implementation uses
+> the same NNTC asset format with a different optimizer; it does not reproduce
+> the native encoder's full option set or exact output. The original project
+> documentation follows below.
+
 NNTC is a generalized latent/modulation codec for PBR material texture sets, in the same broad family of ideas as PVRTC1, but with more latent dimensions and a fixed bilinear feature expansion followed by a fitted affine decoder. It builds directly off the author's [public texture work from 2012](https://web.archive.org/web/20201024153426/https://sites.google.com/site/richgel99/luma_chroma_texture_compression). It uses a bilinear/degree-2 polynomial reconstruction: a degree-2 polynomial whose only quadratic terms are products between the two latents, which are stored as standard BC4/BC5 or uncompressed mipmapped textures. The full-resolution latent texture(s) carry selector/detail information, while the quarter-resolution latent texture carries more slowly varying material/color state. Decoding consists of a fixed, PVRTC1-like bilinear modulation/feature expansion followed by a single fitted affine transform, implemented as a GEMV plus bias. The fitted decoder itself contains no nonlinearity at all; there are no fitted nonlinear functions, activation functions, hidden layers, or neural-network layers.
 
 The `nntc_encode` tool (for Windows or Linux) compresses a PBR material texture set of up to six 24-bpp textures into **two mipmapped latent planes and (typically) a few dozen

@@ -1,0 +1,59 @@
+<!doctype html><meta charset="utf-8"><link rel="icon" href="data:,"><title>NNTC GPU tests</title>
+<script type="module">
+import {BrowserEncoder} from '../webgpu/encoder/encoder.js';
+import {ddsRead} from '../webgpu/dds.js';
+
+// Independent DDS + descriptor reconstruction, including non-rounded BC palettes.
+function decodeReference(result) {
+ const {descriptor:d}=result,planes=d.textures.map(t=>{
+  const out=new Float64Array(t.width*t.height*t.channels_used);let base=0;
+  for(const entry of t.files||[t]) {
+   const img=ddsRead(entry.file,result.files.get(entry.file)),channels=img.channels,offset=img.levels[0].offset;
+   for(let y=0;y<img.H;y++)for(let x=0;x<img.W;x++)for(let c=0;c<channels&&base+c<t.channels_used;c++) {
+    let value;
+    if(!img.bc)value=img.bytes[offset+(y*img.W+x)*channels+c]/255;
+    else {
+     const block=offset+((y>>2)*Math.ceil(img.W/4)+(x>>2))*channels*8+c*8,a=img.bytes[block],b=img.bytes[block+1];
+     const palette=a>b?[a,b,...Array.from({length:6},(_,i)=>((6-i)*a+(i+1)*b)/7)]:[a,b,...Array.from({length:4},(_,i)=>((4-i)*a+(i+1)*b)/5),0,255];
+     const bit=((y%4)*4+x%4)*3,byte=block+2+(bit>>3),selector=((img.bytes[byte]|((img.bytes[byte+1]||0)<<8))>>(bit%8))&7;
+     value=palette[selector]/255;
+    }
+    out[(y*img.W+x)*t.channels_used+base+c]=t.dequantise.lo[base+c]+value*(t.dequantise.hi[base+c]-t.dequantise.lo[base+c]);
+   }base+=channels;
+  }return out;
+ });
+ const t0=d.textures[0],t1=d.textures[1],layer=d.decoder.layers[0],output=new Float64Array(result.reconstructed.length);
+ const sample=(c,x,y)=>{const ix=Math.floor(x),iy=Math.floor(y),fx=x-ix,fy=y-iy;let value=0;for(let dy=0;dy<2;dy++)for(let dx=0;dx<2;dx++)value+=planes[1][(Math.max(0,Math.min(t1.height-1,iy+dy))*t1.width+Math.max(0,Math.min(t1.width-1,ix+dx)))*t1.channels_used+c]*(dx?fx:1-fx)*(dy?fy:1-fy);return value;};
+ for(let y=0;y<t0.height;y++)for(let x=0;x<t0.width;x++) {
+  const s=Array.from(planes[0].slice((y*t0.width+x)*t0.channels_used,(y*t0.width+x+1)*t0.channels_used));
+  const c=Array.from({length:t1.channels_used},(_,i)=>sample(i,(x+.5)*t1.width/t0.width-.5,(y+.5)*t1.height/t0.height-.5));
+  const phi=[...c,...s,...s.flatMap(a=>c.map(b=>a*b))];
+  for(let o=0;o<d.decoder.nout;o++)output[(y*t0.width+x)*d.decoder.nout+o]=layer.bias[o]+phi.reduce((sum,v,i)=>sum+v*layer.weights[o*phi.length+i],0);
+ }
+ let difference=0;for(let i=0;i<output.length;i++)difference=Math.max(difference,Math.abs(output[i]-result.reconstructed[i]));
+ if(difference>2e-4)throw Error(`Exported DDS decode differs from GPU reconstruction: ${difference}`);
+ return difference;
+}
+window.runTest=async(options={})=>{
+ const width=options.width||8,height=options.height||8;
+ const data=new Uint8ClampedArray(width*height*4);
+ for(let y=0;y<height;y++)for(let x=0;x<width;x++)data.set([Math.round(x/Math.max(1,width-1)*255),Math.round(y/Math.max(1,height-1)*255),Math.round((x+y)/Math.max(1,width+height-2)*255),255],(y*width+x)*4);
+ const encoder=await BrowserEncoder.create();
+ const errors=[];encoder.runtime.device.addEventListener('uncapturederror',event=>errors.push(event.error.message));
+ try {
+  const images=Array.from({length:options.textures||1},(_,i)=>({name:`ramp${i}.png`,width,height,data:options.constant?new Uint8ClampedArray(width*height*4).fill(128):Uint8ClampedArray.from(data,(v,k)=>k%4===3?255:i%2?255-v:v*(1-i/12))}));
+  const result=await encoder.encode(images,{iterations:1,...options});
+  const difference=decodeReference(result);
+  const digest=async files=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await new Blob([...files.values()]).arrayBuffer()))).map(x=>x.toString(16).padStart(2,'0')).join('');
+  const hash=await digest(result.files);
+  if(options.repeat) {const repeated=await encoder.encode(images,{iterations:1,...options});if(await digest(repeated.files)!==hash)throw Error('Repeated encode differs.');}
+  const signal=new AbortController();signal.abort();
+  try{await encoder.encode(images,{signal:signal.signal});throw Error('Cancelled encode succeeded');}catch(error){if(error.name!=='AbortError')throw error;}
+  const midRun=new AbortController();
+  try{await encoder.encode(images,{iterations:1,signal:midRun.signal,onProgress:message=>{if(message.startsWith('Optimizing'))midRun.abort();}});throw Error('Mid-run cancellation succeeded');}catch(error){if(error.name!=='AbortError')throw error;}
+  if(encoder.runtime.buffers.size!==0)throw Error('Encode leaked GPU buffers.');
+  if(errors.length)throw Error(errors.join('\n'));
+  return {psnr:result.psnr,descriptor:result.descriptor,files:[...result.files].map(([name,data])=>({name,bytes:data.length})),stats:encoder.runtime.stats,difference,hash,errors};
+ }finally{await encoder.dispose();}
+};
+</script>

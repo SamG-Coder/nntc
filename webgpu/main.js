@@ -1646,6 +1646,18 @@ async function main() {
     requestAnimationFrame(frame);
     canvas.focus();
 
+    // The same-origin encoder hands off in-memory Files through the normal intake.
+    // No uploaded data or persistent browser storage is needed for this preview.
+    if (flag('encoder') && window.parent !== window) {
+        window.addEventListener('message', (event) => {
+            if (event.origin !== location.origin || event.source !== window.parent ||
+                event.data?.type !== 'nntc-encoded-files' || !Array.isArray(event.data.files) ||
+                !event.data.files.every(file => file instanceof File)) return;
+            openFiles(event.data.files);
+        });
+        window.parent.postMessage({type:'nntc-viewer-ready'}, location.origin);
+    }
+
     // LAST, and after the first frame is scheduled: the shot renders offscreen and does not depend on the canvas
     // having drawn, but everything it does depend on - the adapter, the shader, the asset - has happened by here,
     // and a failure before this point has already written its own message and left the title alone.

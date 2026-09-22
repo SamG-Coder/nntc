@@ -1,5 +1,11 @@
 # The NNTC viewer in the browser (WebGPU)
 
+> This fork also includes a browser encoder at `encode.html`, powered by CUDA
+> WebShader. Start it from the repository root with `npm ci` and `npm start`;
+> initialize the pinned `vendor/cuda-webshader` submodule first. See
+> [the encoder guide](../docs/BROWSER_ENCODER.md). The instructions below apply
+> to the viewer by itself.
+
 This page draws an NNTC asset the way a game would: two latent textures on a real hardware sampler, and one small
 affine layer over two samples. It is the same decode the Direct3D 11, Direct3D 12 and Vulkan viewers run, ported to
 WGSL. The controls are ordinary HTML on the left, the picture is WebGPU on the right, and a two-line strip is drawn
