@@ -206,7 +206,15 @@ assets. To view the included assets directly:
 ```bat
 build\Release\nntc_view.exe examples\m1_m4_c0_3_c1_4_nntc.json
 build\Release\nntc_view.exe examples\pavingstones141_1k_c0_4_nntc.json
+build\Release\nntc_view.exe examples\npot360x200_nntc.json
 ```
+
+`npot360x200` is the third one and it is there for a reason: **360 x 200**, non-square and non-power-of-two, with both
+axes divisible by 4 as a block-compressed base must be. Its default chain is 360x200, 180x100, **90x50**, **45x25**,
+**22x12**, so three of its five levels are not multiples of the 4 x 4 block - the shape that catches a wrong copy
+extent, row pitch or block count. Every other asset here is 512 or 1024 with a chain stopping at 8, every level of
+which is block-aligned, so a bug of that kind draws a correct picture on all of them. Use this one when a mip path
+changes.
 
 To recompress those examples from the source JSONs:
 
@@ -523,4 +531,4 @@ the method, [`docs/MATHEMATICS.md`](docs/MATHEMATICS.md) the notes for whoever c
 | `shared/json.h` | public domain (Unlicense), [sheredom](https://github.com/sheredom/json.h) |
 | `viewer/bcdec.h` | MIT / Unlicense dual, [iOrange](https://github.com/iOrange/bcdec) |
 | `src/stb_image.h`, `src/stb_image_write.h`, `src/stb_image_resize2.h` | public domain / MIT dual, [Sean Barrett](https://github.com/nothings/stb) |
-| `examples/PavingStones141_1K-PNG_*.png`, `examples/m1.png` .. `examples/m4.png` | CC0, the PavingStones141 and another material from [ambientCG](https://ambientcg.com) |
+| `examples/PavingStones141_1K-PNG_*.png`, `examples/m1.png` .. `examples/m4.png`, `examples/npot360x200.png` | CC0, the PavingStones141 and another material from [ambientCG](https://ambientcg.com); `npot360x200.png` is a 360 x 200 crop of `PavingStones141_1K-PNG_Color.png` |

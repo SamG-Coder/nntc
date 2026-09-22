@@ -11,6 +11,11 @@
 // The levels are base-first and tightly packed, so a level is w * h * C bytes when the format is uncompressed and
 // ceil(w/4) * ceil(h/4) blocks of 8 (BC4) or 16 (BC5) bytes when it is not - which is why `pitch` is the BLOCK row's
 // byte count for a block format and a texel row's for the others.
+//
+// For the same "no graphics api" reason it does not enforce the multiple-of-4 BASE a block-compressed texture needs: a
+// .dds whose block-compressed base is 358x198 is a well-formed file with a well-defined level walk, and the rule only
+// bites on the way into a texture. Each viewer refuses it by name in its own load_dds - which is where
+// webgpu/descriptor.js puts the same refusal, and not in webgpu/dds.js, this file's port.
 #pragma once
 #include <cstdio>
 #include <cstdint>

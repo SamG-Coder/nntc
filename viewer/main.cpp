@@ -362,6 +362,26 @@ static bool load_dds(const std::string& path, LatentTex& L, bool second = false)
     // BC5 of channels 0-1 and a BC4 of channel 2, so only that both are block-compressed (or neither is) is required.
     if (second && (W != L.W || H != L.H || nmip != L.mips)) { fprintf(stderr, "ERROR: '%s' does not match the first file of this level (%dx%d, %d level%s)\n", path.c_str(), L.W, L.H, L.mips, L.mips == 1 ? "" : "s"); return false; }
     if (second && bc != L.file_bc) { fprintf(stderr, "ERROR: '%s' is %s where the first file of this level is not\n", path.c_str(), bc ? "block-compressed" : "uncompressed"); return false; }
+    // THE BASE OF A BLOCK-COMPRESSED TEXTURE MUST BE A MULTIPLE OF 4, and ONLY the base: this tree supports
+    // non-power-of-two and non-square textures, but a block-compressed base is divisible by 4 texels on each axis. The
+    // LOWER levels are not checked and must not be - a 360x200 base gives a perfectly ordinary 90x50 level, and
+    // examples/npot360x200 is in the tree precisely because three of its five levels are off the block grid.
+    //
+    // It is refused HERE, before the texture is made, because what the apis do with such a base varies and none of them
+    // says THIS. Measured on the machine this was written on: Direct3D 11 returns E_INVALIDARG from CreateTexture2D
+    // with no reason attached, and Direct3D 12 and Vulkan created the texture and sampled it. That is one driver, not
+    // a property of the apis - Microsoft documents that a block-compressed base off the block grid is not guaranteed,
+    // and some drivers take it while others do not. Which is the argument FOR refusing it rather than against: a rule
+    // this tree enforces itself behaves the same everywhere, and an asset that draws here and fails on someone else's
+    // card is worse than one refused on both. This tree does not support such a base, for simplicity, and says so.
+    // nntc_encode pads the base, so an asset out of this tree cannot reach this line; a hand-made or third-party
+    // .dds can.
+    if (bc && ((W % 4) || (H % 4))) {
+        fprintf(stderr, "ERROR: '%s' is %s and its base is %dx%d; a block-compressed base must be a multiple of 4 on\n"
+                        "       both axes (the lower mip levels need not be). nntc_encode pads the base, so this file\n"
+                        "       was not written by it.\n", path.c_str(), dxgi == 80 ? "BC4_UNORM" : "BC5_UNORM", W, H);
+        return false;
+    }
     std::vector<D3D11_SUBRESOURCE_DATA> subs(nmip);
     std::vector<std::pair<int, int>> level_dim(nmip);
     for (int i = 0; i < nmip; i++) {

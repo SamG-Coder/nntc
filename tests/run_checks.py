@@ -17,6 +17,7 @@ default run, where the build and the machine have both backends; --cross-example
 and the ThreadSanitizer arm, last, on Linux only.
 """
 
+import functools
 import hashlib
 import io
 import json
@@ -62,8 +63,15 @@ PNG_MAGIC = bytes([137, 80, 78, 71, 13, 10, 26, 10])
 E_NOISE = 1e-8
 E_REL = 1e-6
 
-SEARCHED_DIRS = ['src', 'shared', 'tools', 'tests', 'docs', 'viewer', 'viewer_vk', 'viewer_d3d12']
+SEARCHED_DIRS = ['src', 'shared', 'tools', 'tests', 'docs', 'viewer', 'viewer_vk', 'viewer_d3d12', 'webgpu']
 SEARCHED_FILES = ['README.md', 'CMakeLists.txt', 'LICENSE', 'PRIOR_ART_DISCLOSURE.md']
+
+# Payloads, not source. The bundled assets under webgpu/assets/ are megabytes of block bytes, and read as text they hit
+# the patterns above by chance: a run of random bytes that happens to spell a bracketed run of capitals is a line tag
+# as far as a regular expression is concerned, and one of the two 1.4 MB planes there already does it twice. The
+# patterns are about this tree's prose and conventions, which a compressed texture was never going to follow, so a
+# file with one of these suffixes is skipped the way the vendored headers are.
+BINARY_SUFFIXES = ('.dds', '.png', '.bmp', '.ico')
 
 # What the run reports at the end: one row per gate, in the order they were reached.
 SUMMARY = []
@@ -127,7 +135,7 @@ def check_tree():
         for dirpath, dirnames, names in os.walk(os.path.join(ROOT, d)):
             dirnames[:] = [x for x in dirnames if x != '__pycache__']   # compiled Python is not source
             for n in names:
-                if n not in VENDORED:
+                if n not in VENDORED and not n.lower().endswith(BINARY_SUFFIXES):
                     paths.append(os.path.join(dirpath, n))
     for path in paths:
         try:
@@ -139,6 +147,258 @@ def check_tree():
                 if pattern.search(line):
                     failures.append('%s:%d: %s: %s' % (os.path.relpath(path, ROOT), i, label, line.strip()))
     return failures
+
+
+# ---------------------------------------------------------------------------
+# The WebGPU viewer's frame, against the Direct3D 12 viewer's (the plan's 8.2)
+#
+# This is the only automated check the page has. The other three viewers are compared against each other on every
+# run of this gate; the browser one was verified by a person looking at it, which is the kind of check that let a
+# mip upload at the wrong extent render as garbage for three rounds without anything noticing.
+#
+# IT IS OPT-IN, with --webgpu-frames, and says so when it is off. It needs a browser on the machine and it drives
+# one, which is a different kind of dependency from a compiler and a .dds, and a gate that failed on a laptop with
+# no Chrome would be worse than one that says plainly which arm did not run.
+#
+# HOW IT WORKS, and why it is not Puppeteer. A page cannot write a file and cannot close the browser, so the two
+# halves of a native --shot are split: the page renders one frame offscreen, POSTs the .bmp back to the server that
+# served it, and sets document.title; this function writes the file and kills the process. Launching a browser at a
+# url is one Popen, and reading the result back is the POST, so the whole of it is the standard library and a
+# browser that is already there.
+# ---------------------------------------------------------------------------
+# WHERE A BROWSER LIVES, built from the environment rather than written down: this tree forbids an absolute
+# Windows path in its sources, and rightly - a drive-letter path in a checked-in file is one machine's layout
+# leaking into everyone else's. The Windows roots come from %ProgramFiles% and friends, which is where an
+# installer puts them anyway, and the Linux ones are plain relative-to-root paths.
+WINDOWS_BROWSERS = [('Google', 'Chrome', 'Application', 'chrome.exe'),
+                    ('Microsoft', 'Edge', 'Application', 'msedge.exe')]
+LINUX_BROWSERS = ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser']
+
+
+def find_browser():
+    for var in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA'):
+        root = os.environ.get(var)
+        if not root:
+            continue
+        for parts in WINDOWS_BROWSERS:
+            path = os.path.join(root, *parts)
+            if os.path.isfile(path):
+                return path
+    for path in LINUX_BROWSERS:
+        if os.path.isfile(path):
+            return path
+    return None
+
+def webgpu_frame_server(out_dir):
+    """The page's own server with one method added: the POST that carries a frame back.
+
+    Rooted at webgpu/, exactly as webgpu/webserver.py is, so the page under test is the page that ships.
+    """
+    import http.server
+    import socketserver
+    import threading
+
+    received = {}
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get('Content-Length', 0))
+            received['bytes'] = self.rfile.read(length)
+            received['name'] = self.headers.get('X-Shot-Name', 'frame.bmp')
+            self.send_response(200)
+            self.send_header('Content-Length', '2')
+            self.end_headers()
+            self.wfile.write(b'ok')
+
+        def end_headers(self):
+            self.send_header('Cache-Control', 'no-store, must-revalidate')
+            super().end_headers()
+
+        def log_message(self, *args):
+            pass          # the gate prints its own lines; a request log per asset is noise
+
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    handler = functools.partial(Handler, directory=os.path.join(ROOT, 'webgpu'))
+    server = socketserver.ThreadingTCPServer(('127.0.0.1', 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, server.server_address[1], received
+
+
+def webgpu_shot(port, received, query, out_path, browser, timeout=90):
+    """One headless frame, written to out_path. Returns the seconds it took."""
+    import shutil
+    import tempfile
+    import time
+    received.pop('bytes', None)
+    profile = tempfile.mkdtemp(prefix='nntc_webgpu_')
+    url = 'http://127.0.0.1:%d/?%s&shot=1&post=/frame' % (port, query)
+    proc = subprocess.Popen([browser, '--headless=new', '--enable-unsafe-webgpu', '--no-first-run',
+                             '--no-default-browser-check', '--disable-gpu-sandbox',
+                             '--user-data-dir=' + profile, url],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    started = time.time()
+    try:
+        while time.time() - started < timeout:
+            if 'bytes' in received:
+                break
+            if proc.poll() is not None and 'bytes' not in received:
+                # The browser exited without posting: usually no WebGPU adapter in this headless mode.
+                raise SystemExit('FAIL: the browser exited before posting a frame for %s' % query)
+            time.sleep(0.25)
+        else:
+            raise SystemExit('FAIL: no frame arrived from the browser within %d s for %s' % (timeout, query))
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        shutil.rmtree(profile, ignore_errors=True)
+    with open(out_path, 'wb') as f:
+        f.write(received['bytes'])
+    return time.time() - started
+
+
+def webgpu_frame_checks(build_dir):
+    """Every bundled material, drawn by the page and by the Direct3D 12 viewer, compared.
+
+    The Direct3D 12 viewer is the right thing to compare against on Windows because Dawn sits on Direct3D 12 there,
+    so the two are the same API two layers apart rather than two different ones.
+    """
+    if '--webgpu-frames' not in sys.argv:
+        print('the WebGPU frame arm                  SKIPPED (opt-in: pass --webgpu-frames; it drives a headless '
+              'browser)')
+        record('the WebGPU frames', 'SKIPPED (opt-in: --webgpu-frames)')
+        return
+    if os.name != 'nt':
+        print('the WebGPU frame arm                  SKIPPED (the Direct3D 12 viewer it compares against is Windows '
+              'only)')
+        record('the WebGPU frames', 'SKIPPED (not Windows)')
+        return
+    browser = find_browser()
+    if not browser:
+        print('the WebGPU frame arm                  SKIPPED (no Chrome or Edge at the usual paths)')
+        record('the WebGPU frames', 'SKIPPED (no browser found)')
+        return
+    viewer = executable(build_dir, 'nntc_view_d3d12')
+    if not os.path.isfile(viewer):
+        print('the WebGPU frame arm                  SKIPPED (nntc_view_d3d12 was not built)')
+        record('the WebGPU frames', 'SKIPPED (nntc_view_d3d12 was not built)')
+        return
+
+    out_dir = os.path.join(ROOT, OUT, 'webgpu_frames')
+    os.makedirs(out_dir, exist_ok=True)
+    index = os.path.join(ROOT, 'webgpu', 'assets', 'assets.json')
+    with open(index, 'r', encoding='utf-8') as f:
+        listed = [entry['file'] for entry in json.load(f)['assets']]
+
+    # Each material once, with the flags that make two renders comparable at all: no overlay (the strip names the
+    # file, which is what two renders of the same asset differ in) and no anisotropy (tap placement is free to
+    # differ between implementations, and the plan's own native comparisons pass --noaniso for the same reason).
+    size = (1280, 720)
+    server, port, received = webgpu_frame_server(out_dir)
+    try:
+        for name in listed:
+            base = name.replace('_nntc.json', '').replace('.json', '')
+            web = os.path.join(out_dir, base + '_web.bmp')
+            native = os.path.join(out_dir, base + '_d3d12.bmp')
+            query = 'asset=assets/%s&size=%dx%d&noaniso=1' % (name, size[0], size[1])
+            webgpu_shot(port, received, query, web, browser)
+            proc = run([viewer, os.path.join('webgpu', 'assets', name), '--shot', native,
+                        '--size', str(size[0]), str(size[1]), '--noaniso', '--nooverlay'])
+            if proc.returncode != 0:
+                raise SystemExit('FAIL: nntc_view_d3d12 --shot returned %d for %s' % (proc.returncode, name))
+            diff = run([sys.executable, os.path.join('tools', 'frame_diff.py'), native, web,
+                        '--max-diff', '2', '--min-psnr', '40'])
+            if diff.returncode != 0:
+                raise SystemExit('FAIL: the page\'s frame of %s differs from the Direct3D 12 viewer\'s:\n%s'
+                                 % (name, diff.stdout + diff.stderr))
+            worst = re.findall(r'max \|diff\| (\d+)', diff.stdout)
+            psnr = re.search(r'PSNR ([\d.]+|inf)', diff.stdout)
+            print('  the WebGPU frame of %-34s max |diff| %s, PSNR %s dB'
+                  % (base, max(int(v) for v in worst) if worst else '?', psnr.group(1) if psnr else '?'))
+
+            # THE SAME FRAME TWICE, byte for byte. A capture that is only usually the same cannot be compared
+            # against anything, and the first thing a flaky one would break is this gate.
+            again = os.path.join(out_dir, base + '_web2.bmp')
+            webgpu_shot(port, received, query, again, browser)
+            if open(web, 'rb').read() != open(again, 'rb').read():
+                raise SystemExit('FAIL: two identical ?shot runs of %s produced different bytes' % name)
+
+        # THE CPU UNPACK AGAINST THE HARDWARE, on this GPU, on the first material (8.4). Wider bounds, because one
+        # is a BC decode in JavaScript and the other is the GPU's own.
+        #
+        # THE HARDWARE SIDE IS ASKED FOR BY NAME, with unpack=0, and is not the frame above. That one was rendered
+        # with ?unpack absent, which means AUTOMATIC: on an adapter without texture-compression-bc it would itself
+        # be the CPU path, and the check would be comparing the unpack against the unpack and passing for the one
+        # reason it must never pass. unpack=0 is refused by name on such an adapter, so the arm fails loudly there
+        # instead of quietly agreeing with itself.
+        name = listed[0]
+        base = name.replace('_nntc.json', '').replace('.json', '')
+        hw = os.path.join(out_dir, base + '_web_unpack0.bmp')
+        webgpu_shot(port, received, 'asset=assets/%s&size=%dx%d&noaniso=1&unpack=0' % (name, size[0], size[1]),
+                    hw, browser)
+        cpu = os.path.join(out_dir, base + '_web_unpack1.bmp')
+        webgpu_shot(port, received, 'asset=assets/%s&size=%dx%d&noaniso=1&unpack=1' % (name, size[0], size[1]),
+                    cpu, browser)
+        diff = run([sys.executable, os.path.join('tools', 'frame_diff.py'), hw, cpu,
+                    '--max-diff', '6', '--min-psnr', '50'])
+        if diff.returncode != 0:
+            raise SystemExit('FAIL: the page\'s CPU unpack differs from its hardware BC path:\n%s'
+                             % (diff.stdout + diff.stderr))
+        psnr = re.search(r'PSNR ([\d.]+|inf)', diff.stdout)
+        print('  the WebGPU CPU unpack vs hardware BC  %s, PSNR %s dB'
+              % (base, psnr.group(1) if psnr else '?'))
+    finally:
+        server.shutdown()
+        server.server_close()
+    record('the WebGPU frames', '%d material(s) within max |diff| 2 and 40 dB of the Direct3D 12 viewer, each one '
+           'byte-identical on a second run, and the CPU unpack within 6 and 50 dB of the hardware path'
+           % len(listed))
+
+
+def webgpu_assets_check():
+    """webgpu/assets/assets.json against the directory it lists, in both directions.
+
+    The list is hand-written (webgpu/README.md says why), so the failure it can have is obvious and mechanical:
+    someone adds a material and forgets the line, and the material is served but never offered - or removes one and
+    leaves the line, and the page's first fetch 404s. Both are named here, as is a listed descriptor whose .dds files
+    are not beside it, which is the other way a bundled asset can be half-copied.
+    """
+    root = os.path.join(ROOT, 'webgpu', 'assets')
+    index = os.path.join(root, 'assets.json')
+    if not os.path.isdir(root):
+        return
+    if not os.path.isfile(index):
+        raise SystemExit('FAIL: webgpu/assets exists and %s does not' % os.path.relpath(index, ROOT))
+    with open(index, encoding='utf-8') as handle:
+        listed = [entry['file'] for entry in json.load(handle)['assets']]
+    present = sorted(n for n in os.listdir(root) if n.endswith('_nntc.json'))
+    missing = [n for n in listed if n not in present]
+    unlisted = [n for n in present if n not in listed]
+    if missing:
+        raise SystemExit('FAIL: webgpu/assets/assets.json lists %s, which is not in the directory'
+                         % ', '.join(missing))
+    if unlisted:
+        raise SystemExit('FAIL: webgpu/assets holds %s, which assets.json does not list, so the page serves it and '
+                         'never offers it' % ', '.join(unlisted))
+    for name in listed:
+        with open(os.path.join(root, name), encoding='utf-8') as handle:
+            descriptor = json.load(handle)
+        wanted = []
+        for texture in descriptor.get('textures', []):
+            if isinstance(texture.get('files'), list):
+                for entry in texture['files']:
+                    wanted.append(entry if isinstance(entry, str) else entry.get('file', ''))
+            elif texture.get('file'):
+                wanted.append(texture['file'])
+        for dds in wanted:
+            if not os.path.isfile(os.path.join(root, dds)):
+                raise SystemExit('FAIL: webgpu/assets/%s names %s, which is not beside it' % (name, dds))
+    print('  webgpu assets: %d material(s) listed, in the directory, with every .dds beside them' % len(listed))
+    record('the webgpu assets', 'assets.json and webgpu/assets agree in both directions (%d material(s))'
+           % len(listed))
 
 
 # The files docs/CPU_BACKEND_PLAN.md decision 1 says are not edited while a second backend is built beside them: the six
@@ -3737,6 +3997,201 @@ def frame_diff(a, b, max_diff, min_psnr, what):
                                        psnr.group(1) if psnr else '?')
 
 
+def quad_rect(frame, distance, tex_w, tex_h):
+    """The pixel rectangle the Direct3D 11 viewer's quad covers in a --shot, from the frame's own size.
+
+    The viewer's own arithmetic, in Python. create_quad gives the quad a half-extent of (1, 1 / aspect) for a texture
+    wider than it is tall and (aspect, 1) otherwise; set_uniforms puts it at (0, 0, z) with no rotation under a
+    90-degree perspective, whose f is therefore 1 and whose x is divided by the window's aspect. A half-extent h
+    projects to h / |z| in normalised device coordinates on y and to h (H / W) / |z| on x, and the viewport turns both
+    of those into h H / (2 |z|) PIXELS. So the quad's pixel footprint is set by the frame's HEIGHT alone, and a caller
+    that picks its distance from the height gets the same footprint on every machine and at every window size.
+
+    The result is (left, right, top, bottom) in pixels, as EDGES and not as pixel indices: a pixel is drawn when its
+    centre falls inside, and u runs from the left edge to the right one. The quad's uv origin is its top-left corner
+    (create_quad says so), so v runs down the frame with no flip.
+    """
+    width, height = frame_size(frame)
+    aspect = tex_w / float(tex_h)
+    half_w, half_h = (1.0, 1.0 / aspect) if aspect >= 1.0 else (aspect, 1.0)
+    half_x = half_w * height / (2.0 * distance)
+    half_y = half_h * height / (2.0 * distance)
+    return (width / 2.0 - half_x, width / 2.0 + half_x, height / 2.0 - half_y, height / 2.0 + half_y)
+
+
+def quad_level_psnr(frame, distance, level_png, tex_w, tex_h, border=1):
+    """A viewer frame's quad against ONE decoded level of the asset, resampled onto the quad's own pixel grid.
+
+    The reference is a decoded level of the shipped asset - the software decode, which round_trip has already matched
+    to the independent reader within one step - sampled bilinearly with clamp-to-edge addressing at the uv of each
+    pixel centre, which is what the hardware does for the level it lands on. So the number this returns is high only
+    for the level the sampler actually read, and a caller can ask for every level and see WHICH one the camera reached
+    rather than take it on trust.
+
+    `border` drops that many pixels from each side of the quad. The pixels along the edge are the ones whose coverage
+    is a rasteriser's tie to break, and they are worth nothing to this comparison, so one ring of them goes.
+    """
+    import math
+    from PIL import Image as PILImage
+    data = open(os.path.join(ROOT, frame), 'rb').read()
+    offset = struct.unpack_from('<I', data, 10)[0]
+    width, height = struct.unpack_from('<ii', data, 18)
+    pitch = (width * 3 + 3) & ~3
+    left, right, top, bottom = quad_rect(frame, distance, tex_w, tex_h)
+    columns = [x for x in range(width) if left <= x + 0.5 <= right]
+    rows = [y for y in range(height) if top <= y + 0.5 <= bottom]
+    if border:
+        columns, rows = columns[border:-border], rows[border:-border]
+    if len(columns) < 4 or len(rows) < 4:
+        raise SystemExit('FAIL: the quad covers %dx%d pixels at |z| %.2f, too few to compare anything over'
+                         % (len(columns), len(rows), distance))
+    ref = PILImage.open(os.path.join(ROOT, level_png)).convert('RGB')
+    ref_w, ref_h = ref.size
+    texel = ref.load()
+    total, count = 0.0, 0
+    for y in rows:
+        # The frame is bottom-up and three bytes a pixel, in the order blue, green, red.
+        row = offset + (height - 1 - y) * pitch
+        v = min(max((y + 0.5 - top) / (bottom - top) * ref_h - 0.5, 0.0), ref_h - 1.0)
+        y0 = int(v)
+        y1 = min(y0 + 1, ref_h - 1)
+        fy = v - y0
+        for x in columns:
+            u = min(max((x + 0.5 - left) / (right - left) * ref_w - 0.5, 0.0), ref_w - 1.0)
+            x0 = int(u)
+            x1 = min(x0 + 1, ref_w - 1)
+            fx = u - x0
+            for c in range(3):
+                a = texel[x0, y0][c] * (1.0 - fx) + texel[x1, y0][c] * fx
+                b = texel[x0, y1][c] * (1.0 - fx) + texel[x1, y1][c] * fx
+                total += (data[row + x * 3 + (2 - c)] - (a * (1.0 - fy) + b * fy)) ** 2
+                count += 1
+    mse = total / count
+    return float('inf') if mse == 0.0 else 10.0 * math.log10(255.0 * 255.0 / mse)
+
+
+def mip_alignment_shot_check(encode, build_dir):
+    """THE CHAIN THAT LEAVES BLOCK ALIGNMENT, DRAWN BY A VIEWER.
+
+    The gate already encodes assets whose lower planes are not a whole number of blocks - 40x40 under --l0 bc8, 44x44
+    at --mip-min 4, the padded 45x30 - but it only ever pushes them through the encoder and dds_decode.py. Every
+    --shot in this file draws a 64x64 tests/tiny.png, whose chain is 64, 32, 16, 8 and stays a multiple of four all
+    the way down, so no VIEWER had ever been photographed on a chain that leaves block alignment.
+
+    That is exactly the blind spot a real defect went through. The WebGPU viewer handed each mip's LOGICAL extent to
+    writeTexture, WebGPU wants whole blocks of a block-compressed format, the copy was rejected without a word, the
+    mip stayed zero-filled and the picture was wrong from that level down. Three rounds of byte-identical frame
+    comparisons missed it because every asset they compared was 512 or 1024 on a side. The three native viewers and
+    the encoder were audited afterwards and handle the case correctly, so this arm is not expected to find anything
+    today; it is here so that the next one cannot hide.
+
+    ONE viewer, the Direct3D 11 one, and one asset: a 60x40 crop of tests/tiny.png, made in a temporary directory the
+    way the 40x40 and the 45x30 cases make theirs, so nothing is added to tests/. At --mip-min 4 its chain is 60x40,
+    30x20, 15x10, 7x5 - the base divides by four, which is the tree's rule and is what keeps the encoder from padding
+    it, and every level below the base does not, on one axis or on both. It is not square on purpose: a viewer that
+    swapped a level's width for its height would draw a square asset perfectly.
+
+    THE CAMERA IS THE POINT. A frame at the default distance magnifies the base and would pass with every level below
+    it zero-filled, so the two --shot cameras here are chosen to put the sampler ON a level that is not block-aligned:
+    2.02 and 4.06 level-0 texels to the screen pixel, a hardware LOD of 1.01 and 2.02, which lands on the 30x20 and
+    the 15x10 planes with two per cent of the level below them underneath. The fractions are untidy because a tidy one
+    is worse: at exactly four texels a pixel the quad's edges fall on pixel CENTRES, where whether the outermost
+    column is drawn at all is a rasteriser's tie to break, and one and a half per cent of a texel moves them off it
+    while leaving the LOD within 0.03 of the integer. The distance that gives a chosen ratio is derived from the
+    frame's own height (quad_rect says why), so the quad covers the same 30x20 and 15x10 pixels whatever window the
+    machine gave the viewer. The 7x5 plane at the bottom of the chain is NOT reachable: eight texels a pixel is
+    |z| about 190 on a 1440-row frame and the viewer's far plane is 100, so the quad would be clipped away rather
+    than minified. The two levels these cameras do reach are both of them not a whole number of blocks, which is
+    what the case is for.
+
+    AND THE FRAME IS COMPARED AGAINST THE SOFTWARE DECODE, at every stored level and not only at the one it should be:
+    the level the camera aims at has to be the best match by a wide margin, which is what says the deep plane is being
+    READ and not merely present. Sampler filtering makes that a PSNR and not the byte comparison two frames of one
+    picture can carry. Measured here: 34.0 dB against M1 at the first camera with 22.1 dB the best of the other three
+    levels, and 37.4 dB against M2 at the second with 20.8 dB the best of the others. The bound is 28 dB with 6 dB of
+    margin over every other level - six decibels below what was measured and six above the nearest wrong level - which
+    leaves room for another device's filtering and rasterisation without leaving room for a level that is not there.
+    A mip that stayed zero-filled is the flat colour the decoder returns for a latent of zeros: zeroing M1 of the
+    level-0 .dds by hand between the round trip and the frames - which is what the rejected copy left behind -
+    takes the first camera to 5.81 dB and no level of the chain above 6.04, and zeroing M2 takes the second to
+    6.04 dB and none above 6.37. Both miss the bound and the margin by a mile, which is the arm failing when the
+    fault is present rather than a comment that has never fired.
+    """
+    import shutil
+    import tempfile
+
+    tex_w, tex_h = 60, 40
+    chain = [(60, 40), (30, 20), (15, 10), (7, 5)]
+    tmp = tempfile.mkdtemp(prefix='nntc_align_')
+    try:
+        from PIL import Image as PILImage
+        crop = os.path.join(tmp, 'odd60x40.png')
+        PILImage.open(os.path.join(ROOT, 'tests', 'tiny.png')).convert('RGB').crop((0, 0, tex_w, tex_h)).save(crop)
+        odir, prefix = out_asset('tiny_mip_align', 'odd60x40')
+        proc = run([encode, crop, '-o', odir, '--mip-min', '4'])
+        if proc.returncode != 0:
+            raise SystemExit('FAIL: nntc_encode on the %dx%d crop returned %d' % (tex_w, tex_h, proc.returncode))
+        if 'WARNING: the input is' in proc.stdout:
+            raise SystemExit('FAIL: %dx%d is a multiple of 4 on both axes and must not be padded' % (tex_w, tex_h))
+        loop_checks(proc.stdout, 1e-4)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    planes = [(int(w), int(h)) for w, h in re.findall(r'^    M\d+  level 0 (\d+)x(\d+)', proc.stdout, re.M)]
+    if planes != chain:
+        raise SystemExit('FAIL: the %dx%d chain at --mip-min 4 must be %s, not %s'
+                         % (tex_w, tex_h, ', '.join('%dx%d' % p for p in chain), planes))
+    for level, (w, h) in enumerate(planes[1:], 1):
+        if w % 4 == 0 and h % 4 == 0:
+            raise SystemExit('FAIL: M%d of this chain is %dx%d, a whole number of blocks on both axes, so the case '
+                             'tests nothing it was written for' % (level, w, h))
+    # The software decode the frames are judged against, tied to the asset's own bytes first: the independent reader
+    # matches the recon PNGs within one step at every level, so those PNGs are what the .dds and the .json say.
+    round_trip(prefix, prefix + '_recon', 'the 60x40 chain, whose M1, M2 and M3 are not whole blocks')
+
+    if os.name != 'nt':
+        print('  the mip alignment: the viewer is skipped (Windows only); the chain and its round trip are asserted '
+              'above')
+        record('a chain that leaves block alignment',
+               '60x40 -> 30x20 -> 15x10 -> 7x5 encodes and round-trips; the viewer skipped (Windows only)')
+        return
+    view = executable(build_dir, 'nntc_view')
+    desc = prefix + '_nntc.json'
+    # The frame's height is what the two distances are derived from, and the viewer sizes its swap chain from the
+    # window Windows gave it rather than from a constant, so the height is read off a frame rather than assumed.
+    shot(view, desc, os.path.join(OUT, 'mip_align_probe.bmp'), [])
+    height = frame_size(os.path.join(OUT, 'mip_align_probe.bmp'))[1]
+    said = []
+    for texels, level in ((2.02, 1), (4.06, 2)):
+        distance = texels * height / float(tex_w)
+        if distance >= 99.0:
+            raise SystemExit('FAIL: %.2f texels a pixel is |z| %.1f on a %d-row frame, at or past the viewer\'s far '
+                             'plane of 100, where the quad is clipped away instead of drawn' % (texels, distance,
+                                                                                                height))
+        frame = os.path.join(OUT, 'mip_align_M%d.bmp' % level)
+        # --noaniso for the reason the other minified comparisons in this file give: anisotropic tap placement is a
+        # device's own business, and the quad here is square-on, so there is nothing for it to do but add noise.
+        shot(view, desc, frame, ['--noaniso', '--z', '%.4f' % -distance])
+        scores = [quad_level_psnr(frame, distance, '%s_recon_M%d.png' % (prefix, m), tex_w, tex_h)
+                  for m in range(len(planes))]
+        # The margin subsumes the ordering: a level the frame is not the best match for is not 6 dB clear of the
+        # best of the others either. One failure, with the whole chain's numbers in it, because which level the
+        # frame DOES look like is the first thing a reader of this failure wants.
+        others = max(scores[m] for m in range(len(scores)) if m != level)
+        if scores[level] < 28.0 or scores[level] - others < 6.0:
+            raise SystemExit('FAIL: at %.2f texels a pixel nntc_view should be drawing the software decode of M%d '
+                             '(%dx%d, not a whole number of blocks), which is 28 dB and 6 dB over every other '
+                             'level; the frame is %.2f dB there and %s dB over M0..M%d'
+                             % (texels, level, planes[level][0], planes[level][1], scores[level],
+                                ' '.join('%.2f' % s for s in scores), len(scores) - 1))
+        said.append('M%d (%dx%d) %.1f dB, every other level at most %.1f'
+                    % (level, planes[level][0], planes[level][1], scores[level], others))
+    print('  the mip alignment: nntc_view draws the %s chain at two minified cameras and each frame is the software '
+          'decode of the level it aims at: %s' % (' / '.join('%dx%d' % p for p in chain), '; '.join(said)))
+    record('a chain that leaves block alignment',
+           'nntc_view on 60x40 / 30x20 / 15x10 / 7x5: ' + '; '.join(said))
+
+
 def vulkan_viewer_checks(encode, build_dir):
     """The Vulkan viewer against the Direct3D one, on the same assets, frame by frame.
 
@@ -5545,6 +6000,7 @@ def main():
     bare_command_check(encode)
     old_format_check(encode, build_dir)
     viewer_refusal_checks(encode, build_dir)
+    mip_alignment_shot_check(encode, build_dir)
     vulkan_viewer_checks(encode, build_dir)
     d3d12_viewer_checks(encode, build_dir)
     absolute_path_check(encode, build_dir)
@@ -5566,6 +6022,10 @@ def main():
     record('block (b)', 'converged, dense-solve agreement, zero gradient left behind')
 
     cross_backend_checks(encode, cross_examples)
+
+    webgpu_assets_check()
+
+    webgpu_frame_checks(build_dir)
 
     failures = check_tree()
     for f in failures:

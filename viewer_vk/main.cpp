@@ -1552,6 +1552,27 @@ static bool load_dds(const std::string& path, Latent& L, bool second = false) {
                 img.bc ? "block-compressed" : "uncompressed");
         return false;
     }
+    // THE BASE OF A BLOCK-COMPRESSED TEXTURE MUST BE A MULTIPLE OF 4, and ONLY the base: this tree supports
+    // non-power-of-two and non-square textures, but a block-compressed base is divisible by 4 texels on each axis. The
+    // LOWER levels are not checked and must not be - a 360x200 base gives a perfectly ordinary 90x50 level, and
+    // examples/npot360x200 is in the tree precisely because three of its five levels are off the block grid.
+    //
+    // Measured on the driver this was written against: vkCreateImage takes such a base, the validation layer says
+    // nothing, and the asset is drawn as though its base were the size the encoder wrote - a picture and no error,
+    // which is what the WebGPU viewer was caught doing. That is one driver and not a guarantee; Direct3D 12 makes the
+    // same thing an explicit capability (OPTIONS8's UnalignedBlockTexturesSupported), so a base off the block grid is
+    // something an implementation MAY take, not something any of them must. Which is why it is refused here rather
+    // than left to the driver: an asset that draws on one machine and fails on another is worse than one refused on
+    // both, and this tree does not support such a base. The refusal is made before the image exists, where it can say
+    // which file and how big it is. nntc_encode pads the base, so an asset out of this tree cannot reach this line; a
+    // hand-made or third-party .dds can.
+    if (img.bc && ((img.W % 4) || (img.H % 4))) {
+        fprintf(stderr, "ERROR: '%s' is %s and its base is %dx%d; a block-compressed base must be a multiple of 4 on\n"
+                        "       both axes (the lower mip levels need not be). nntc_encode pads the base, so this file\n"
+                        "       was not written by it.\n",
+                path.c_str(), img.dxgi == 80 ? "BC4_UNORM" : "BC5_UNORM", img.W, img.H);
+        return false;
+    }
     if (!upload_dds(img, path, second ? L.img_b : L.img)) return false;
     if (second) { L.stored_C_b = img.channels; L.dxgi_b = img.dxgi; }
     else {
@@ -2226,8 +2247,8 @@ static std::string exe_dir(const char* argv0) {
 
 // The shader BESIDE THE EXECUTABLE, and nowhere else. It used to try the working directory first, which meant that a
 // stray view.frag anywhere the viewer happened to be started from silently replaced the real one - a blank frame and
-// an exit code of 0, which is the worst shape a failure can take. The build's POST_BUILD copy puts both files next to
-// the executable, so that is the one place they are read from, by --shot and by key R alike; the full path is printed
+// an exit code of 0, which is the worst shape a failure can take. The build copies the three shader files next to the
+// executable on every build, so that is the one place they are read from, by --shot and by key R alike; the full path is printed
 // on every compile so there is never any doubt which file was read. That rule also closes the hole a shader with no
 // entry point would open, and shaderc closes the rest of it: glslang reports a stage with no main as a compilation
 // error ("Missing entry point"), so a file that compiles at all has one.

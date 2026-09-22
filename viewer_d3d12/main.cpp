@@ -785,6 +785,30 @@ static bool load_dds(const std::string& path, LatentTex& L, bool second = false)
     // BC5 of channels 0-1 and a BC4 of channel 2, so only that both are block-compressed (or neither is) is required.
     if (second && (W != L.W || H != L.H || nmip != L.mips)) { fprintf(stderr, "ERROR: '%s' does not match the first file of this level (%dx%d, %d level%s)\n", path.c_str(), L.W, L.H, L.mips, L.mips == 1 ? "" : "s"); return false; }
     if (second && bc != L.file_bc) { fprintf(stderr, "ERROR: '%s' is %s where the first file of this level is not\n", path.c_str(), bc ? "block-compressed" : "uncompressed"); return false; }
+    // THE BASE OF A BLOCK-COMPRESSED TEXTURE MUST BE A MULTIPLE OF 4, and ONLY the base: this tree supports
+    // non-power-of-two and non-square textures, but a block-compressed base is divisible by 4 texels on each axis. The
+    // LOWER levels are not checked and must not be - a 360x200 base gives a perfectly ordinary 90x50 level, and
+    // examples/npot360x200 is in the tree precisely because three of its five levels are off the block grid.
+    //
+    // Direct3D 12 makes it a CAPABILITY, not a rule: D3D12_FEATURE_DATA_D3D12_OPTIONS8's
+    // UnalignedBlockTexturesSupported (Windows 10 build 20348 and later) says whether this device takes such a base.
+    // Microsoft's own wording - "If false, then Direct3D 12 requires that the dimensions of the top-level mip of a
+    // block-compressed texture are aligned to multiples of 4 (such alignment requirements do not apply to
+    // less-detailed mips)", which is also the clearest statement anywhere that the LOWER levels are unconstrained.
+    // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_feature_data_d3d12_options8
+    // Measured on the card this was written on, which evidently answers true: the texture is created, the debug layer
+    // and GPU-based validation pass it in silence, and the asset is drawn as though its base were the size the encoder
+    // wrote - a picture and no error, the failure the WebGPU viewer was caught in. On a device answering false the same
+    // asset fails instead. That split is the argument FOR refusing it here rather than querying the cap and allowing
+    // it: an asset that draws on one card and fails on another is worse than one refused on both, and this tree does
+    // not support such a base. nntc_encode pads it, so an asset out of this tree cannot reach this line; a hand-made
+    // or third-party .dds can.
+    if (bc && ((W % 4) || (H % 4))) {
+        fprintf(stderr, "ERROR: '%s' is %s and its base is %dx%d; a block-compressed base must be a multiple of 4 on\n"
+                        "       both axes (the lower mip levels need not be). nntc_encode pads the base, so this file\n"
+                        "       was not written by it.\n", path.c_str(), dxgi == 80 ? "BC4_UNORM" : "BC5_UNORM", W, H);
+        return false;
+    }
     std::vector<const uint8_t*> bytes((size_t)nmip);
     std::vector<size_t> pitch((size_t)nmip);
     std::vector<std::pair<int, int>> level_dim((size_t)nmip);
