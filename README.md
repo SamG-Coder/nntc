@@ -10,6 +10,8 @@ four channels, and one matrix multiply of a few dozen to a few hundred multiply-
 material (the count is in [How it works](#how-it-works-briefly), below). No runtime library, no decompression at load, no neural inference: the files are standard mipmapped `.dds`
 (BC4 / BC5 and 8-bit) and a `.json` containing the fitted bilinear model's decoder coefficients.
 
+The WebGPU NNTC viewer is [hosted live on the web here](https://subquantumtech.com/nntc/).
+
 The [VK_NV_cooperative_vector](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_cooperative_vector.html) extension is supported in the Vulkan viewer for potentially faster decoding. The D3D 12 viewer optionally supports the [Linear Algebra Runtime](https://microsoft.github.io/DirectX-Specs/d3d/D3D12LinearAlgebraRuntimeFeatureSupport.html).
 
 NNTC is a generalized latent/modulation codec, in the same broad family of ideas as PVRTC1, but with more latent dimensions and a fitted bilinear decoder. It builds directly off the author's [public Prior Art texture work from 2012](https://web.archive.org/web/20201024153426/https://sites.google.com/site/richgel99/luma_chroma_texture_compression). It uses a bilinear/degree-2 polynomial decoder, i.e. a degree-2 polynomial whose only quadratic terms are the products between the two latents stored as standard BC4/BC5/uncompressed mipmapped textures. The full-resolution latent texture(s) represent edge/detail information, while the quarter-resolution latent texture represents slowly varying material/colour state.
@@ -316,6 +318,8 @@ naming the value it replaced; `--weights` and `--mip-filter` take exactly one en
 command line stays the vanilla path: the built-in box chain, weights 1, no JSON needed.
 
 ## Viewing
+
+The WebGPU NNTC viewer is [hosted live on the web here](https://subquantumtech.com/nntc/).
 
 The tree has **four viewers**, for various graphics APIs: `nntc_view` on Direct3D 11, `nntc_view_d3d12` on Direct3D 12
 (with an optional Shader Model 6.10 linear-algebra decode path), `nntc_view_vk` on Vulkan (with an optional
