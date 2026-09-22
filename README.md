@@ -61,7 +61,8 @@ newer is the minimum the build accepts; 13.4 (VS 2026) and 13.3 (WSL) are what t
 
 **CUDA is optional.** CMake probes for a CUDA compiler. With one, the encoder is built with both backends, CUDA and CPU,
 and uses the GPU. Without one it prints a CMake Warning, `No CUDA compiler was found: the encoder nntc_encode is built
-with its CPU backend only`, and builds everything else as usual -- on Windows all three viewers and `bc_check`, on Linux the
+with its CPU backend only`, and builds everything else as usual -- on Windows the three built viewers and
+`bc_check`, on Linux the
 Vulkan viewer (the two Direct3D viewers and `bc_check` are Windows programs). So an Arm laptop or an AMD or Intel box can
 encode, slower, and view (the `examples/` directory ships several assets; `build/nntc_view_vk
 examples/pavingstones141_1k_c0_4_nntc.json` opens one). The release gate runs on such a machine too.
@@ -316,11 +317,20 @@ command line stays the vanilla path: the built-in box chain, weights 1, no JSON 
 
 ## Viewing
 
-The tree has **three viewers**, one per graphics API: `nntc_view` on Direct3D 11, `nntc_view_d3d12` on Direct3D 12
-(with an optional Shader Model 6.10 linear-algebra decode path) and `nntc_view_vk` on Vulkan (with an optional
-`VK_NV_cooperative_vector` decode path). Three, because the format's claim is about *the* hardware sampling operator
-rather than one vendor's or one API's, and three implementations drawing one picture is the cheapest evidence of that.
-They share the same keys, the same flags and the same overlay.
+The tree has **four viewers**, for various graphics APIs: `nntc_view` on Direct3D 11, `nntc_view_d3d12` on Direct3D 12
+(with an optional Shader Model 6.10 linear-algebra decode path), `nntc_view_vk` on Vulkan (with an optional
+`VK_NV_cooperative_vector` decode path), and `webgpu/` on WebGPU, in a browser. They share the same keys, the same
+flags and the same overlay.
+
+The first three are built with the rest of the tree. **The browser one is not built at all.** Run its server, from
+anywhere in the tree:
+
+```
+python webgpu/webserver.py
+```
+
+It serves the `webgpu/` directory and prints the address to open, `http://localhost:8082`. Three materials ship with
+it, so there is something to look at before you have encoded anything of your own.
 
 ```
 build\Release\nntc_view.exe       examples\m1_m4_c0_3_c1_4_nntc.json
@@ -357,6 +367,10 @@ viewer's own README has its full key list, its flags and its shader. What belong
 * **Vulkan** ([`viewer_vk/README.md`](viewer_vk/README.md)) is the portable path to Linux, where `--shot` runs without a desktop. Where the
   device offers `VK_NV_cooperative_vector` it decodes through that extension's matrix-vector instruction instead of
   the shader's loop (`--coopvec 0|1`, the key `K`); every other device never hears of it.
+* **WebGPU** ([`webgpu/README.md`](webgpu/README.md)) is the same decode transliterated to WGSL, with no build step
+  and no third-party code. It is the one a reader can run without a compiler, and the only one that takes a folder
+  of materials and lists them. `python tests/run_checks.py --webgpu-frames` compares its frames against the
+  Direct3D 12 viewer's.
 
 ### The two ways to apply the level-1 mip shift
 
@@ -395,7 +409,8 @@ fragile than it looks. Measured here it matches the bias or edges it by up to 2 
 on purpose: it is simple, it is right on every vendor, and grazing angles only need to look good enough. An engine
 that wants the last few dB on oblique surfaces can add this itself.
 
-**Which to use.** B if one code path has to be right on every GPU, which is why all three viewers use it. A if you know
+**Which to use.** B if one code path has to be right on every GPU, which is why all four viewers use it -- and the
+browser one could not use A even if it wanted to, since WebGPU has no sampler LOD bias field at all. A if you know
 the hardware is NVIDIA or AMD, or you select per vendor at run time (PCI vendor `0x8086` is Intel): it is cheaper and
 it is the sharper picture under anisotropic filtering. Do not apply both at once: that is a shift of 4 levels, and
 it is blurry everywhere. In the viewers, key `L` (or `--nobias`) turns the shift off entirely, which shows what it
