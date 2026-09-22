@@ -1,0 +1,224 @@
+/* style.css: two columns, the controls on the left and the picture on the right.
+ *
+ * The shape is KTX2 Studio's (basis_universal/webgl/ktx2_studio/index.html): a flex row filling the viewport, a
+ * controls column of fixed width that scrolls on its own so a long panel never moves the picture, and the viewer
+ * taking the rest. What is not copied: its 600 px column (this one is 400), its small-screen breakpoint (this is a
+ * developer tool for a desktop and nothing is laid out for a phone), and its inline handlers.
+ *
+ * THE CANVAS IS SIZED BY SCRIPT, NOT SCALED BY CSS: the rules below give it a layout box, and main.js sets its
+ * backing store to that box times devicePixelRatio through a ResizeObserver, so one canvas pixel is one device pixel.
+ */
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #1b1d21;
+    color: #d6d8dc;
+    font: 13px/1.45 "Segoe UI", system-ui, sans-serif;
+}
+
+#app { display: flex; height: 100%; }
+
+/* The panel's width is set here and changed by the splitter beside it, which writes the same property. KTX2
+ * Studio's column is a fixed 600px; this one is draggable, because a wide asset readout and a wide picture want
+ * different splits and the answer depends on the monitor. */
+#panel {
+    width: 400px;
+    min-width: 0;
+    height: 100%;
+    overflow-y: auto;
+    padding: 10px 12px 40px 12px;
+    background: #23262b;
+    border-right: 1px solid #34383e;
+}
+
+#panel h1 { font-size: 15px; font-weight: 600; margin: 0; }
+#panel h1 .sub { font-weight: 400; color: #8b919b; }
+
+/* The title and the Help button on one line at the very top: the owner's own placement, because F1 is the browser's
+ * key on a page and a button is the contract a keystroke cannot be. */
+.title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px 0 12px 0; }
+
+fieldset {
+    border: 1px solid #34383e;
+    border-radius: 4px;
+    margin: 0 0 10px 0;
+    padding: 8px 10px 10px 10px;
+}
+legend { color: #9aa2ad; font-weight: 600; padding: 0 4px; }
+
+.row { display: flex; align-items: center; gap: 6px; margin: 4px 0; flex-wrap: wrap; }
+.row label { color: #9aa2ad; }
+.block { margin-top: 10px; }
+.label { color: #9aa2ad; font-weight: 600; margin-bottom: 4px; }
+
+button, select, input[type="file"] {
+    font: inherit;
+    color: #e6e8ec;
+    background: #2d3138;
+    border: 1px solid #434852;
+    border-radius: 3px;
+    padding: 3px 6px;
+}
+button { cursor: pointer; }
+button:hover { background: #363b43; }
+select { max-width: 270px; }
+input[type="file"] { width: 100%; margin: 4px 0; }
+
+label.check { display: block; margin: 6px 0 2px 0; }
+
+#drop-zone {
+    border: 1px dashed #4a505a;
+    border-radius: 4px;
+    padding: 10px;
+    text-align: center;
+    color: #8b919b;
+}
+#drop-zone.over { border-color: #6fa8dc; color: #cfe3f7; background: #2a333d; }
+
+.quiet { color: #8b919b; margin: 6px 0; }
+/* `error` is a MODIFIER on the status line and nothing else styles itself with it; the rules that used to make
+ * a standalone red paragraph are gone, since the id below sets every property they did. */
+
+/* THE STATUS LINE: one slot at the top of the panel that says what just happened, whether it worked or not.
+ *
+ * It is given a block of its own so that it reads as a single statement rather than as a stray line among the
+ * controls, and empty it takes no room at all, so a panel with nothing to say looks exactly as it did before.
+ *
+ * TWO APPEARANCES, ONE SLOT. A success is ordinary text: the page did what was asked, and colouring that is
+ * decoration. A failure carries the red bar. The difference is the `error` class and nothing else, so a caller
+ * chooses what happened and never what it should look like - and a reader learns one place to look rather than
+ * two, which is the whole reason success and failure share a line instead of having one each. */
+#status-line:not(:empty) {
+    margin: 0 0 10px 0;
+    padding: 8px 10px;
+    border: 1px solid #3a3f46;
+    border-left: 3px solid #6b7280;
+    border-radius: 4px;
+    background: #24272b;
+    color: #d6d9de;
+    white-space: pre-wrap;
+}
+#status-line.error:not(:empty) {
+    border-color: #5c3a3a;
+    border-left-color: #ff8a80;
+    background: #2e2426;
+    color: #ff8a80;
+}
+
+.readout { color: #c4c8ce; }
+.readout p { margin: 4px 0; }
+.readout b { color: #e6e8ec; font-weight: 600; }
+code { font-family: Consolas, "Courier New", monospace; }
+
+table { border-collapse: collapse; width: 100%; margin: 4px 0 8px 0; font-size: 12px; }
+th, td { border: 1px solid #34383e; padding: 2px 5px; text-align: left; vertical-align: top; }
+th { color: #9aa2ad; font-weight: 600; background: #262a30; }
+td.num { text-align: right; font-family: Consolas, "Courier New", monospace; }
+
+.rows-title { color: #9aa2ad; margin: 8px 0 2px 0; }
+.file-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 12px; }
+.file-row .name { font-family: Consolas, "Courier New", monospace; }
+.file-row .ok { color: #8fd18f; }
+.file-row .want { color: #d9b26f; }
+
+/* Four pixels of grab area, the whole height, with the cursor that says what it does. It does not shrink when the
+ * flex row is tight, or the handle would vanish exactly when a narrow window needs it most. */
+#splitter {
+    flex: 0 0 4px;
+    cursor: col-resize;
+    background: #34383e;
+    border: none;
+}
+#splitter:hover, #splitter.dragging { background: #5a6270; }
+
+#view { flex: 1; position: relative; min-width: 0; display: flex; flex-direction: column; }
+#canvas { display: block; width: 100%; height: 100%; outline: none; }
+#canvas:focus { outline: 1px solid #6fa8dc; outline-offset: -1px; }
+#hint {
+    position: absolute; left: 10px; bottom: 8px; margin: 0;
+    color: #8b919b; background: rgba(0, 0, 0, 0.45); padding: 2px 6px; border-radius: 3px;
+}
+#hint.hidden { display: none; }
+#fatal {
+    position: absolute; left: 0; top: 0; right: 0; padding: 18px 24px;
+    color: #ffd9d4; background: rgba(60, 20, 20, 0.92); font-size: 14px; white-space: pre-wrap;
+}
+#fatal:empty { display: none; }
+
+/* The message log at the foot of the panel (index.html says why it is there and not docked to the viewport). It is
+ * selectable <pre> text on purpose: what a user does with a validation string is paste it. */
+#log-panel { margin: 6px 0 0 0; }
+#log-panel summary { cursor: pointer; color: #9aa2ad; }
+#log-list {
+    margin: 6px 0 0 0; padding: 6px; max-height: 180px; overflow: auto;
+    background: #16191d; border: 1px solid #34383e; border-radius: 3px;
+    font-family: Consolas, "Courier New", monospace; font-size: 11px; line-height: 1.45;
+    color: #c4c8ce; white-space: pre-wrap; word-break: break-word; user-select: text;
+}
+#log-list:empty { display: none; }
+
+/* A control group: the name, then the radios under it. A radio set IS the readout of the mode it sets (the plan's
+ * 6.4), so there is no second line of status text anywhere below to keep in step with it. */
+.ctl { margin: 6px 0 4px 0; }
+.ctl-name { color: #9aa2ad; font-weight: 600; margin-bottom: 2px; }
+label.opt { display: inline-block; margin-right: 10px; white-space: nowrap; }
+label.opt input, label.check input { margin: 0 4px 0 0; vertical-align: -1px; }
+label.check .quiet { margin: 0 0 0 4px; }
+
+/* The key each control answers to, printed beside it, so the panel teaches the keys rather than hiding them. */
+.key {
+    display: inline-block;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+    color: #9aa2ad;
+    background: #2d3138;
+    border: 1px solid #434852;
+    border-radius: 3px;
+    padding: 0 4px;
+    line-height: 15px;
+}
+
+.row.cam label { width: 34px; }
+.row.cam input[type="number"] {
+    width: 62px;
+    font: inherit;
+    font-family: Consolas, "Courier New", monospace;
+    color: #e6e8ec;
+    background: #2d3138;
+    border: 1px solid #434852;
+    border-radius: 3px;
+    padding: 2px 4px;
+}
+
+/* The help dialog. A real <dialog>, shown with showModal(), so Esc closes it and the browser draws the backdrop. */
+#help-dialog {
+    width: min(760px, 88vw);
+    max-height: 86vh;
+    padding: 0;
+    color: #d6d8dc;
+    background: #23262b;
+    border: 1px solid #434852;
+    border-radius: 6px;
+    overflow: hidden;
+}
+#help-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+.help-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 10px 16px;
+    background: #2a2e34;
+    border-bottom: 1px solid #34383e;
+}
+.help-head h2 { font-size: 15px; font-weight: 600; margin: 0; }
+.help-head .sub { font-weight: 400; color: #8b919b; }
+.help-body { padding: 4px 16px 18px 16px; overflow-y: auto; max-height: calc(86vh - 44px); }
+.help-body h3 { font-size: 13px; color: #9aa2ad; margin: 14px 0 4px 0; }
+.help-body p, .help-body li { margin: 6px 0; }
+.help-body ol { margin: 6px 0; padding-left: 20px; }
+table.keys { width: 100%; }
+table.keys td { vertical-align: top; }
+table.keys td:first-child { width: 130px; white-space: nowrap; }
+table.keys th { background: #262a30; }

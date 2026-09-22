@@ -1,0 +1,17 @@
+{
+  "comment": "The materials bundled with this page, so that it opens on a working picture with no file interaction at all. HAND-WRITTEN, deliberately: a generator would be a feature bolted onto a server that is copied because it is trusted, and a static host has no directory listing. The failure a hand-written list can have - a material added and the line forgotten - is what tests/run_checks.py's webgpu_assets_check catches, in both directions.",
+  "assets": [
+    {
+      "file": "m1_nntc.json",
+      "note": "one texture at the encoder's defaults: the one-file BC5 level 0, textures_out 1, the simplest asset"
+    },
+    {
+      "file": "m1_m4_c0_3_c1_4_nntc.json",
+      "note": "a four-texture material; a two-file level 0 of a BC5 and a BC4 (the three-channel case, sel.z == 2); a seven-level mip chain; the texture selector"
+    },
+    {
+      "file": "pavingstones141_1k_c0_4_nntc.json",
+      "note": "a 1K material with two BC5 files (the four-channel case); the largest thing the CPU unpack decodes among these"
+    }
+  ]
+}

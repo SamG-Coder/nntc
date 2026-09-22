@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NNTC latent viewer v1.00 (WebGPU)</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+<div id="panel">
+  <div class="title-row">
+    <h1>NNTC latent viewer <span class="sub">WebGPU v1.00</span></h1>
+    <button id="help-button" title="what this is, how to use it, and every key (F1)">Help</button>
+  </div>
+
+  <!-- THE ONE MESSAGE, at the top of the panel where it is read. Everything that can refuse a load writes here and
+       nowhere else: a set of files that is still short of a descriptor's, a .json that is not a descriptor, a file
+       that changed on disk, a shader that would not compile. It sits above the controls rather than under them
+       because a message under a fieldset is a message found afterwards, and because the panel below it is then left
+       looking as it did - an incomplete selection changes the message and the file list and nothing else. -->
+  <p id="status-line" role="status"></p>
+
+  <fieldset>
+    <legend>Load</legend>
+    <div class="row">
+      <select id="asset-select" title="the materials you can open - the ones in your folder, and the ones bundled with this page"></select>
+      <button id="reload" title="re-read the descriptor and every .dds, keeping the camera and every mode (key R)">Reload</button>
+    </div>
+    <p class="quiet" id="reload-note" hidden></p>
+    <!-- THE WORKING DIRECTORY. Both of these are hidden until the page has run its feature test, and exactly one of
+         them is ever shown: the block where `showDirectoryPicker` exists, the line where it does not. The test is
+         'showDirectoryPicker' in window and NEVER the user agent string - a control that cannot work is not drawn,
+         and a browser is not asked who it is when it can be asked what it has. -->
+    <div class="block" id="workdir-block" hidden>
+      <div class="row">
+        <button id="workdir-pick" title="pick one folder for the page to read; its materials join the pulldown above">Select working
+          directory...</button>
+        <button id="workdir-reopen" hidden title="ask the browser for the folder you granted last time; its prompt is where
+          &quot;allow on every visit&quot; lives">Reopen</button>
+        <button id="workdir-forget" hidden title="drop this page's record of the folder; the browser keeps its own permission, in
+          its site settings">Forget</button>
+      </div>
+      <p class="quiet" id="workdir-note"></p>
+    </div>
+    <p class="quiet" id="folder-note" hidden>This browser has no button that asks for a folder. You can still give it
+      one. <b>Drop a folder on the page</b> and its materials join the pulldown above. The browser cannot store that
+      folder, so you drop it again on each visit. You can also select or drop a <code>.json</code> and its
+      <code>.dds</code> files together, which needs no permission at all.</p>
+    <div class="block">
+      <div class="label">Your files</div>
+      <div class="row">
+        <button id="open-files">Open files...</button>
+        <span class="quiet">the <code>.json</code> and its <code>.dds</code> files - together (Ctrl+A), or a few at
+          a time, from any folders</span>
+      </div>
+      <input type="file" id="file-input" multiple accept=".json,.dds" hidden>
+      <div id="drop-zone">or drag the files onto this page</div>
+      <div id="file-rows"></div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Loaded files</legend>
+    <div id="asset-readout" class="readout">nothing loaded yet</div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Show</legend>
+    <div class="row">
+      <label for="tex-select">Texture <span class="key">N</span></label>
+      <select id="tex-select" title="the output texture of the material (key N cycles them)"></select>
+    </div>
+    <div class="row">
+      <label for="chan-select">Channel(s) to view</label>
+      <select id="chan-select" title="which channels to draw; one on its own is drawn as grey, so its magnitude
+        can be read rather than its hue">
+        <option value="rgb">RGB</option>
+        <option value="r">R</option>
+        <option value="g">G</option>
+        <option value="b">B</option>
+        <option value="a">A</option>
+      </select>
+    </div>
+    <p class="quiet">Applies to all three views above. A four-channel latent's fourth channel can only be seen this
+      way; in Decode, A is 1.0 by construction and draws white.</p>
+    <div class="ctl">
+      <div class="ctl-name">View</div>
+      <label class="opt"><input type="radio" name="view" id="view-decode" value="decode"> Decode</label>
+      <label class="opt"><input type="radio" name="view" id="view-raw0" value="raw0"> Level 0 as stored
+        <span class="key">1</span></label>
+      <label class="opt"><input type="radio" name="view" id="view-raw1" value="raw1"> Level 1 as stored
+        <span class="key">2</span></label>
+    </div>
+    <div class="ctl">
+      <div class="ctl-name">Geometry <span class="key">C</span></div>
+      <label class="opt"><input type="radio" name="geom" id="geom-quad" value="quad"> Quad</label>
+      <label class="opt"><input type="radio" name="geom" id="geom-cube" value="cube"> Cube</label>
+      <label class="opt"><input type="radio" name="geom" id="geom-sphere" value="sphere"> Sphere</label>
+    </div>
+    <label class="check"><input type="checkbox" id="row-box"> One object per texture, in a row
+      <span class="key">G</span></label>
+    <p class="quiet">A material with more than one output texture draws them side by side, so two can be compared
+      without switching between them. <b>N</b>, and the Texture pulldown above, then slide which texture sits on
+      which object rather than picking one to look at: with the row on, that control is an offset into the row.</p>
+    <label class="check"><input type="checkbox" id="orbit-box"> Turn the view, 30 degrees a second
+      <span class="key">O</span></label>
+    <label class="check"><input type="checkbox" id="renorm-box"> Renormalise as a tangent-space normal
+      <span class="key">V</span></label>
+    <p class="quiet">Unpack, unit length, repack. Grey-ish and black-ish pixels and those with z &lt; 0 are left
+      alone, as the native viewers leave them.</p>
+    <div class="row">
+      <button id="reset-view" title="put the camera and every mode back to the defaults (key Space)">Reset view</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Sample</legend>
+    <div class="ctl">
+      <div class="ctl-name">Filter</div>
+      <label class="opt"><input type="radio" name="filter" id="filter-point" value="0"> Point
+        <span class="key">P</span></label>
+      <label class="opt"><input type="radio" name="filter" id="filter-bilinear" value="1"> Bilinear
+        <span class="key">B</span></label>
+      <label class="opt"><input type="radio" name="filter" id="filter-trilinear" value="2"> Trilinear
+        <span class="key">T</span></label>
+    </div>
+    <label class="check"><input type="checkbox" id="aniso-box"> Anisotropy <span class="key">X</span>
+      <span class="quiet" id="aniso-note"></span></label>
+    <label class="check"><input type="checkbox" id="mips-box"> Mips <span class="key">M</span>
+      <span class="quiet">off: the sampler is held at mip 0, nothing is reloaded</span></label>
+    <label class="check"><input type="checkbox" id="lodbias-box"> Level 1 LOD shift <span class="key">L</span></label>
+    <p class="quiet">The level-1 shift is the encoder's 1:1 mip rule: off is visibly wrong from mip 1 down, and that
+      is what it is for. It is applied to the GRADIENTS, because WebGPU's sampler has no LOD bias field at all.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Camera</legend>
+    <div class="row cam">
+      <label for="cam-x">X</label><input type="number" id="cam-x" step="0.1">
+      <label for="cam-y">Y</label><input type="number" id="cam-y" step="0.1">
+      <label for="cam-z">Z</label><input type="number" id="cam-z" step="0.1">
+    </div>
+    <div class="row cam">
+      <label for="cam-yaw">Yaw</label><input type="number" id="cam-yaw" step="1">
+      <label for="cam-pitch">Pitch</label><input type="number" id="cam-pitch" step="1">
+    </div>
+    <p class="quiet">Arrows move, <b>W</b>/<b>S</b> zoom, <b>A</b>/<b>D</b> yaw, <b>Q</b>/<b>E</b> pitch, with
+      <b>Shift</b> for one third the speed; dragging the view and the wheel do the same. <b>Space</b>, or "Reset
+      view" at the foot of the Show group, puts the camera <i>and every mode above</i> back.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Decode</legend>
+    <div id="decode-readout" class="readout"></div>
+    <label class="check"><input type="checkbox" id="unpack-box"> Unpack BC4/BC5-&gt;Uncompressed on CPU</label>
+    <p class="quiet" id="unpack-note"></p>
+    <div class="row">
+      <button id="reload-shader" title="re-read nntc_view.wgsl and rebuild the pipeline (Shift+R)">Reload shader</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Display</legend>
+    <div class="row">
+      <label for="colorspace-select">Canvas colour space</label>
+      <select id="colorspace-select" title="display only: it relabels the canvas and changes no pixel">
+        <option value="srgb">sRGB (matches the native viewers)</option>
+        <option value="display-p3">Display P3</option>
+      </select>
+    </div>
+    <p class="quiet" id="colorspace-note">Display only: it relabels the canvas and changes no pixel, so the same
+      numbers look more saturated on a wide-gamut screen. The native viewers have no such control, so anything but
+      sRGB is a picture they cannot draw.</p>
+    <label class="check"><input type="checkbox" id="overlay-box"> Draw the frame-rate and camera strip</label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Keys</legend>
+    <div class="readout">
+      <p>Click the view first: the keys go to the canvas, so typing in the panel never moves the camera.</p>
+      <p>Every key is listed in <b>Help</b> (the button at the top, or <b>F1</b>), and every one of them is a control
+        in this panel as well.</p>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>About</legend>
+    <div class="readout">
+      <p>The NNTC asset on a real hardware sampler, in the browser. The decode is a port of
+        <code>viewer/bin/nntc_view.hlsl</code>, which the Direct3D 11 and Direct3D 12 viewers share; see
+        <code>webgpu/README.md</code> beside this page.</p>
+    </div>
+  </fieldset>
+
+  <!-- THE FRAME. A capture is drawn away from the canvas at a size of its own and WITHOUT the overlay, which is
+       what `nntc_view --shot --nooverlay` writes and the only thing worth comparing against it. The .bmp is that
+       file byte for byte - 24-bit, bottom-up, BGR - so tools/frame_diff.py reads one from this page and one from a
+       native viewer without knowing which is which. The .png is for a person to look at. -->
+  <fieldset>
+    <legend>Frame</legend>
+    <div class="row">
+      <button id="save-bmp" title="render one frame without the overlay and save it as the 24-bit .bmp the native
+        viewers write, which tools/frame_diff.py compares">Save frame (.bmp)</button>
+      <button id="save-png" title="the same frame as a .png, for looking at">Save frame (.png)</button>
+    </div>
+    <div class="row">
+      <label for="shot-size">Size</label>
+      <input id="shot-size" type="text" size="11" placeholder="the canvas"
+             title="the captured frame's size as WIDTHxHEIGHT; empty means the canvas as it is now">
+      <button id="copy-link" title="copy a link that opens this page on this material with this camera and these
+        modes">Copy link</button>
+    </div>
+    <p class="quiet" id="frame-note">A capture never contains the overlay, so two of them can be compared byte for
+      byte. Copy link carries the camera and every mode, and the material when it is one of the bundled ones - a
+      folder of your own is not something a link can reach.</p>
+  </fieldset>
+
+  <!-- THE MESSAGES SECTION, and it is ONE MORE FIELDSET IN THE SCROLLING COLUMN on purpose, in the flow rather than
+       docked to the bottom of the viewport. docs/WEBGPU_VIEWER_PLAN.md section 10.2 says the bottom of this panel is
+       where the encoder front end goes when it comes - source images dropped there, options, export - and that
+       therefore "the panel's bottom stays free ... the panel is one scrolling column of <fieldset>s to which a
+       section is appended". A log pinned to the viewport would own that space for good; a fieldset can be pushed
+       down by a section appended above it, or moved below one, with nothing to undo.
+
+       The status line at the top of the panel says what JUST happened; the log below keeps the SEQUENCE, which is the
+       part one line cannot carry: one refusal usually causes two more, and the first is the real one while the last
+       is what the line happens to be showing. Everything that reaches the line reaches the log too, so the log is
+       complete.
+
+       IT IS ALWAYS ON THE PAGE, open, empty or not. It used to appear only once it had something in it, which
+       spared a clean run an empty console and cost more than it saved: the paragraph above it promised a log the
+       reader could not see, and someone looking for why a picture was wrong had to know already that the thing
+       existed. Knowing WHERE it is before there is anything in it is most of its value.
+
+       EVERY LINE SAYS WHO SAID IT. A refusal from WebGPU and a refusal from this page read alike once both are
+       sentences in a list, and they are acted on differently - a device or a driver saying no, against the page
+       declining to do something - so the source is in the line with the number and the time. -->
+  <fieldset>
+    <legend>Messages</legend>
+    <label class="check"><input type="checkbox" id="strict-box"> Stop on a WebGPU error
+      <span class="quiet">(?strict=1)</span></label>
+    <p class="quiet">This does not turn validation on: WebGPU checks every call already, always, and anything it
+      refuses reaches the log below - tagged <code>[WebGPU]</code> - whatever this box says. What it changes is the
+      RESPONSE: an error becomes a stop, with the message held in front of you and drawing halted on the last good
+      frame, instead of a line the moving picture carries past your attention.</p>
+    <p class="quiet">Every message this page shows is kept here in order, each one numbered, timed, and tagged
+      with where it came from: <code>[WebGPU]</code> for anything the device or driver refused,
+      <code>[page]</code> for the viewer's own. The status line at the top of the panel shows only the newest.</p>
+    <details id="log-panel" open>
+      <summary id="log-summary">no messages</summary>
+      <div class="row">
+        <button id="log-copy" title="copy every message below to the clipboard">Copy</button>
+        <button id="log-clear" title="empty the log">Clear</button>
+        <span class="quiet" id="log-note"></span>
+      </div>
+      <pre id="log-list" tabindex="0"></pre>
+    </details>
+  </fieldset>
+</div>
+
+<div id="splitter" title="drag to resize the panel; double-click to reset"></div>
+
+<div id="view">
+  <canvas id="canvas" tabindex="0"></canvas>
+  <p id="hint">click the view for keys</p>
+  <div id="fatal"></div>
+</div>
+
+</div>
+
+<dialog id="help-dialog">
+  <div class="help-head">
+    <h2>NNTC latent viewer <span class="sub">WebGPU v1.00</span></h2>
+    <button id="help-close" autofocus title="Esc also closes this">Close</button>
+  </div>
+  <div class="help-body">
+    <h3>What this is</h3>
+    <p>An NNTC material is two small latent textures and a handful of weights. This page samples each latent once per
+      pixel with the <b>GPU's own sampler</b> - the same filtering, mips and anisotropy a game would use - and runs
+      the decoder in the fragment shader, so what you see is what a real renderer would get rather than an offline
+      decode. The shader is a transliteration of <code>viewer/bin/nntc_view.hlsl</code>, the file the Direct3D 11 and
+      Direct3D 12 viewers both compile, and this page's keys are those viewers' keys.</p>
+    <p>Where the GPU has no <code>texture-compression-bc</code>, the page unpacks BC4 and BC5 on the CPU in plain
+      JavaScript and binds uncompressed planes instead; the shader does not change. The <b>Decode</b> block in the
+      panel says which path drew level 0.</p>
+
+    <h3>The workflow</h3>
+    <ol>
+      <li><b>Open a bundled material.</b> The pulldown at the top of the panel lists the materials that ship with this
+        page; one is already open. Picking another <b>resets the view</b>, because a new material is a new thing to
+        look at.</li>
+      <li><b>Or give the page a folder.</b> <b>Drop a folder on the page</b>, or press "Select working
+        directory..." where your browser has that button (Chrome and Edge do, and the panel says so when yours does
+        not). The page treats the two the same way. Every material in the folder joins the same pulldown. You can
+        open one of them by picking or dropping its <code>.json</code> on its own, because the page reads the
+        <code>.dds</code> files it names out of that folder. <b>Reload</b> re-reads those files from disk and lists
+        the folder again, so a material you encode while the page is open shows up too. The page only reads your
+        files. It never writes. A folder you pick with the button is remembered for your next visit, though the
+        browser may ask you once more before the page may read it. A folder you drop in a browser that has no such
+        button cannot be stored at all, so you drop it again next time. The panel says which of the two you
+        have.</li>
+      <li><b>Or bring your own files.</b> Select a material's <code>PREFIX_nntc.json</code> and its <code>.dds</code> files
+        <i>together</i> (open the folder, Ctrl+A, Open), or drag the group - or the folder itself - onto the
+        page. No browser hands a page a
+        file's siblings, so the descriptor alone cannot load on its own - but <b>the page keeps every file you offer
+        it</b>, so picking the <code>.json</code> and then picking its <code>.dds</code> files works, in as many goes
+        as it takes and from as many folders. Until the set is complete the top of the panel says what is still
+        wanted, by name, the rows under "Your files" list what is in hand, and the material on screen does not
+        move.</li>
+      <li><b>Look.</b> Drag the view to yaw and pitch, the wheel zooms, and the keys below do the rest. The
+        <b>Loaded files</b> block is the asset's own facts: both latents side by side, the four bitrates and the
+        decoder's weight count. <b>Channel(s) to view</b>, in the Show group, draws one channel at a time - R, G, B
+        or A - in all three views, and draws it as <b>grey</b> rather than in its own colour, so what you read is a
+        magnitude and not a hue. It is the only way to see a four-channel latent's fourth channel. In Decode, alpha
+        is 1.0 by construction and A therefore draws white.</li>
+      <li><b>Re-encode and press <code>R</code>.</b> <b>Reload</b> re-reads the same files and <b>keeps the camera and
+        every mode</b>, which is the whole point of it: the same angle and the same settings, the new encode. It is
+        the opposite of Reset.</li>
+    </ol>
+
+    <h3>Reset, and what it covers</h3>
+    <p><b>Space</b>, the <b>Reset view</b> button at the foot of the Show group and the button below all do the same
+      thing: the camera, the filter, anisotropy, mips, the level-1 LOD shift, the geometry, the raw views, the
+      renormalise flag, the channels shown and the shown texture all go back to where a fresh load leaves them. It
+      is there for when a few keystrokes have left the picture looking wrong and you cannot remember which one did
+      it.</p>
+    <p class="quiet">Four things it deliberately leaves alone. Three are about the device or the display rather than
+      the view: the CPU unpack checkbox (which path level 0 is bound through), the canvas colour space, and "Stop on
+      a WebGPU error" beside the message log. The fourth is the drawn frame-rate and camera strip, which is a thing
+      over the picture and not part of it.</p>
+    <p><button id="help-reset">Reset view</button></p>
+
+    <h3>Keys</h3>
+    <p class="quiet">Click the view first - the keys go to the canvas, so typing in the panel never moves the camera.
+      Every key here is also a control in the left panel, and the two always agree.</p>
+    <table class="keys">
+      <tr><th colspan="2">Camera (hold)</th></tr>
+      <tr><td><code>arrows</code></td><td>move the quad or cube left / right / up / down</td></tr>
+      <tr><td><code>W</code> / <code>S</code></td><td>zoom in / out</td></tr>
+      <tr><td><code>A</code> / <code>D</code></td><td>yaw</td></tr>
+      <tr><td><code>Q</code> / <code>E</code></td><td>pitch</td></tr>
+      <tr><td><code>Shift</code></td><td>with any of the above: one third the speed</td></tr>
+      <tr><td><code>Space</code></td><td>reset: the camera and every mode below, back to a fresh load</td></tr>
+      <tr><th colspan="2">Display</th></tr>
+      <tr><td><code>C</code></td><td>quad, cube, sphere</td></tr>
+      <tr><td><code>G</code></td><td>one object per output texture, in a row; <b>N</b> then slides which
+        texture is on which</td></tr>
+      <tr><td><code>O</code></td><td>turn the view by itself, 30 degrees a second</td></tr>
+      <tr><td><code>N</code></td><td>next output texture of a material (cycles)</td></tr>
+      <tr><td><code>1</code></td><td>show level 0's texture as stored (toggle)</td></tr>
+      <tr><td><code>2</code></td><td>show level 1's texture as stored (toggle)</td></tr>
+      <tr><td><code>V</code></td><td>renormalise the shown texture as a tangent-space normal (toggle)</td></tr>
+      <tr><th colspan="2">Sampling</th></tr>
+      <tr><td><code>P</code> / <code>B</code> / <code>T</code></td><td>point / bilinear / trilinear filter</td></tr>
+      <tr><td><code>X</code></td><td>anisotropic filtering on / off (trilinear filtering only)</td></tr>
+      <tr><td><code>M</code></td><td>mips on / off (off: the sampler is held at mip 0, nothing is reloaded)</td></tr>
+      <tr><td><code>L</code></td><td>level 1's LOD shift on / off (its gradients x 2^lod_bias_level1)</td></tr>
+      <tr><th colspan="2">Other</th></tr>
+      <tr><td><code>R</code></td><td>reload the asset, keeping the camera and every mode</td></tr>
+      <tr><td><code>Shift</code>+<code>R</code></td><td>reload the shader (<code>nntc_view.wgsl</code>)</td></tr>
+      <tr><td><code>F1</code></td><td>this page</td></tr>
+      <tr><td><code>Esc</code></td><td>close this page</td></tr>
+      <tr><td>drag, wheel</td><td>yaw and pitch; zoom</td></tr>
+    </table>
+    <p><b>Three differences from the native viewers</b>, and no others. <code>R</code> reloads the <i>asset</i> here
+      and <code>Shift</code>+<code>R</code> the shader, because the asset is the thing that changes ten times an hour
+      in an encode-look-encode loop; <code>Ctrl</code>+<code>R</code> stays the browser's. <code>Esc</code> closes
+      this page rather than quitting, since a page cannot close itself. And the native <code>4</code> (level 0 from a
+      BC pack made at load) and <code>5</code>-<code>8</code> (the shader's spare debug constants) are not bound: the
+      pack applies only to an uncompressed level 0 and is not implemented here, and nothing in the shipped shader
+      reads the spare constants.</p>
+
+    <h3>URL fields</h3>
+    <p>They mirror the native viewers' flag names: <code>?asset=</code>, <code>?tex=</code>, <code>?cube</code>,
+      <code>?z=</code> <code>?yaw=</code> <code>?pitch=</code> <code>?x=</code> <code>?y=</code>,
+      <code>?nomips</code> <code>?nobias</code> <code>?noaniso</code> <code>?renorm</code> <code>?raw0</code>
+      <code>?raw1</code>, and beside them <code>?unpack=0|1</code>, <code>?overlay=0</code>,
+      <code>?geom=quad|cube|sphere</code>, <code>?row=1</code>, <code>?orbit=1</code>,
+      <code>?filter=point|bilinear|trilinear</code> and <code>?chan=rgb|r|g|b|a</code>. A URL that sets a mode
+      is honoured on the first load and is not undone by it.</p>
+    <p class="quiet">Part of the NNTC tree; see <code>webgpu/README.md</code> beside this page, and
+      <code>docs/FORMAT.md</code> for the format itself.</p>
+  </div>
+</dialog>
+
+<script type="module" src="main.js"></script>
+</body>
+</html>
