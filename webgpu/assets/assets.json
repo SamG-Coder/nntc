@@ -18,6 +18,10 @@
       "note": "a PBR NNTC material"
     },
 	{
+      "file": "me_source_material_nntc.json",
+      "note": "a PBR NNTC material"
+    },
+	{
       "file": "m1_nntc.json",
       "note": "one texture at the encoder's defaults: the one-file BC5 level 0, textures_out 1, the simplest asset"
     }
