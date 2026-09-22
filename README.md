@@ -525,7 +525,7 @@ Also see:
 - [Texture compression using low-frequency signal modulation](https://www.researchgate.net/publication/221249059_Texture_compression_using_low-frequency_signal_modulation) by Fenney (2003)
 - [Real-Time Neural Materials using Block-Compressed Features](https://onlinelibrary.wiley.com/doi/10.1111/cgf.15013) by Weinreich et al. (2024)
 - [Hardware Accelerated Neural Block Texture Compression with Cooperative Vectors](https://arxiv.org/abs/2506.06040) by Belcour and Benyoub (2025)
-- [Basis Universal](http://github.com/BinomialLLC/basis_universal/): Its transcoders have been capable of transcoding to multiple GPU output textures from single input ETC1S texture layers for many years
+- [Basis Universal](http://github.com/BinomialLLC/basis_universal/): Its transcoders have been capable of transcoding to multiple output GPU textures from single input ETC1S textures for many years
 
 [`docs/DESIGN.md`](docs/DESIGN.md) is
 the method, [`docs/MATHEMATICS.md`](docs/MATHEMATICS.md) the notes for whoever changes it, [`PRIOR_ART_DISCLOSURE.md`](PRIOR_ART_DISCLOSURE.md) the public description.
